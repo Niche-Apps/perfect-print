@@ -1,7 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-use crate::error::{CoreError, CoreResult};
-use crate::font::FontRef;
+use crate::error::CoreResult;
 use crate::image::ImageData;
 
 /// A font with its loaded data.

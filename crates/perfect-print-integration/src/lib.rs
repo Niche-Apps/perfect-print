@@ -1,3 +1,5 @@
+#![cfg_attr(not(test), allow(dead_code, unused_imports))]
+
 //! Integration tests: build → render → parse → verify.
 
 use perfect_print_core::color::Color;
@@ -25,6 +27,15 @@ fn render_to_pdf_bytes(model: &perfect_print_core::document::DocumentModel) -> V
     let bytes = std::fs::read(&path).expect("Failed to read PDF");
     let _ = std::fs::remove_file(&path);
     bytes
+}
+
+fn count_nonwhite_pixels(path: &std::path::Path) -> usize {
+    image::open(path)
+        .expect("PNG should decode")
+        .to_rgba8()
+        .pixels()
+        .filter(|pixel| pixel.0[0..3] != [255, 255, 255])
+        .count()
 }
 
 // ─── End-to-End: Simple Document ─────────────────────────────────────
@@ -75,6 +86,38 @@ fn e2e_document_with_text_pdf() {
     assert!(pdf_bytes.len() > 200);
     let pdf_str = String::from_utf8_lossy(&pdf_bytes);
     assert!(pdf_str.contains("BT"), "PDF should contain text markers");
+}
+
+#[test]
+fn e2e_document_with_unshaped_text_raster_is_visible() {
+    let mut page = perfect_print_core::page::Page::new(PageSize::Letter);
+    page.add(DrawCommand::Text {
+        run: TextRun {
+            text: "Unshaped raster text".to_string(),
+            glyphs: vec![],
+            style: TextStyle::new(FontRef::new("Helvetica"), 24.0),
+        },
+        position: Point::new(72.0, 72.0),
+        max_width: None,
+    });
+
+    let model = DocumentBuilder::new().add_page(page).build().unwrap();
+    let dir = std::env::temp_dir().join(format!(
+        "e2e_unshaped_text_{}_{}",
+        std::process::id(),
+        TEST_ID.fetch_add(1, Ordering::SeqCst)
+    ));
+    let renderer = perfect_print_render::TinySkiaRenderer::new();
+    let paths = renderer
+        .render_to_raster(&model, perfect_print_core::units::Dpi(72.0), &dir)
+        .unwrap();
+
+    let nonwhite = count_nonwhite_pixels(&paths[0]);
+    let _ = std::fs::remove_dir_all(&dir);
+    assert!(
+        nonwhite > 0,
+        "raster fallback must draw TextRun.text when glyphs are empty"
+    );
 }
 
 #[test]
@@ -221,6 +264,89 @@ fn e2e_public_api_render_png() {
         assert!(path.exists());
     }
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn e2e_public_api_paragraph_raster_is_visible() {
+    let dir = std::env::temp_dir().join(format!(
+        "e2e_public_paragraph_{}_{}",
+        std::process::id(),
+        TEST_ID.fetch_add(1, Ordering::SeqCst)
+    ));
+    let _ = std::fs::remove_dir_all(&dir);
+
+    let paths = perfect_print::Document::new()
+        .add(perfect_print::Paragraph::new("Hello visible raster text").font_size(24.0))
+        .render_png(&dir, 72)
+        .expect("render_png should succeed");
+
+    let nonwhite = count_nonwhite_pixels(&paths[0]);
+    let _ = std::fs::remove_dir_all(&dir);
+    assert!(
+        nonwhite > 0,
+        "public API paragraph text should render visible pixels"
+    );
+}
+
+#[test]
+fn e2e_public_api_merge_preserves_pages() {
+    let left = perfect_print::Document::new()
+        .title("Merged")
+        .add(perfect_print::Paragraph::new("left page"));
+    let right = perfect_print::Document::new().add(perfect_print::Paragraph::new("right page"));
+
+    let merged = left.merge(right).build();
+    assert_eq!(merged.page_count(), 2);
+    assert!(
+        merged.all_commands().count() >= 2,
+        "merged document should preserve draw commands from both inputs"
+    );
+    assert_eq!(merged.metadata.title.as_deref(), Some("Merged"));
+}
+
+#[test]
+fn e2e_public_api_from_json_preserves_pages_and_commands() {
+    let original = perfect_print::Document::new()
+        .title("Roundtrip")
+        .add(perfect_print::Paragraph::new("roundtrip text"))
+        .build();
+    let original_command_count = original.all_commands().count();
+    let json = original.to_json().unwrap();
+
+    let restored = perfect_print::Document::from_json(&json).unwrap().build();
+    assert_eq!(restored.page_count(), original.page_count());
+    assert_eq!(restored.all_commands().count(), original_command_count);
+    assert_eq!(restored.metadata.title.as_deref(), Some("Roundtrip"));
+}
+
+#[test]
+fn e2e_public_api_from_json_can_append_content() {
+    let original = perfect_print::Document::new()
+        .add(perfect_print::Paragraph::new("before"))
+        .build();
+    let json = original.to_json().unwrap();
+
+    let restored = perfect_print::Document::from_json(&json)
+        .unwrap()
+        .add(perfect_print::Paragraph::new("after"))
+        .build();
+
+    assert_eq!(restored.page_count(), 2);
+    assert_eq!(restored.all_commands().count(), 2);
+}
+
+#[test]
+fn e2e_public_api_merge_can_append_content() {
+    let left = perfect_print::Document::new().add(perfect_print::Paragraph::new("left"));
+    let right = perfect_print::Document::new().add(perfect_print::Paragraph::new("right"));
+
+    let merged = left
+        .merge(right)
+        .add(perfect_print::Paragraph::new("later"))
+        .build();
+
+    assert_eq!(merged.page_count(), 3);
+    assert_eq!(merged.all_commands().count(), 3);
 }
 
 // ─── End-to-End: PDF <-> Raster Parity ────────────────────────────────

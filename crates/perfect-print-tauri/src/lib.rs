@@ -20,9 +20,9 @@
 
 use perfect_print_core::document::DocumentModel;
 use perfect_print_dialog::{
-    ColorMode, DuplexMode, PageOrientation, PageRange, PrintDialog, PrintDialogResult, PrintError,
-    PrintScaling, PrintSettings, Printer, PrinterCapabilities, PrinterState,
+    PrintDialog, PrintDialogResult, PrintError, PrintSettings, Printer, PrinterCapabilities,
 };
+#[cfg(feature = "tauri")]
 use perfect_print_pdf::PdfRenderer;
 
 /// Tauri print dialog that uses the webview's native print.
@@ -47,17 +47,6 @@ impl TauriPrintDialog {
     #[cfg(not(feature = "tauri"))]
     pub fn new() -> Self {
         Self { _private: () }
-    }
-
-    /// Render the document to a temporary PDF.
-    fn render_to_pdf(&self, model: &DocumentModel) -> Result<std::path::PathBuf, PrintError> {
-        let temp_dir = std::env::temp_dir();
-        let pdf_path = temp_dir.join("perfect-print-tauri-temp.pdf");
-        let renderer = PdfRenderer::new();
-        renderer
-            .render_to_pdf(model, &pdf_path)
-            .map_err(|e| PrintError::PrintFailed(format!("PDF render failed: {}", e)))?;
-        Ok(pdf_path)
     }
 }
 
@@ -110,7 +99,7 @@ impl Default for TauriPrintDialog {
 /// and triggers the native print dialog.
 #[cfg(feature = "tauri")]
 pub fn submit_print_job(
-    webview_window: &tauri::WebviewWindow,
+    _webview_window: &tauri::WebviewWindow,
     model: &DocumentModel,
     settings: &PrintSettings,
 ) -> PrintDialogResult<Option<String>> {
@@ -147,7 +136,7 @@ mod tests {
     fn test_show_print_dialog() {
         let dialog = TauriPrintDialog { _private: () };
         let settings = PrintSettings::default();
-        let result = dialog.show_print_dialog(&settings, Some("Test"));
+        let _result = dialog.show_print_dialog(&settings, Some("Test"));
         #[cfg(not(feature = "tauri"))]
         assert!(result.is_err());
     }

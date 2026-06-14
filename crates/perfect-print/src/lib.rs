@@ -48,6 +48,7 @@ pub struct Document {
     default_style: Option<TextStyle>,
     header: Option<DrawCommand>,
     footer: Option<DrawCommand>,
+    model_override: Option<DocumentModel>,
 }
 
 impl Document {
@@ -61,6 +62,7 @@ impl Document {
             default_style: None,
             header: None,
             footer: None,
+            model_override: None,
         }
     }
 
@@ -139,24 +141,58 @@ impl Document {
         self
     }
 
-    pub fn build(mut self) -> DocumentModel {
+    pub fn build(self) -> DocumentModel {
+        let Document {
+            builder,
+            blocks,
+            page_size,
+            margins,
+            image_store,
+            default_style,
+            header,
+            footer,
+            model_override,
+        } = self;
+
         let config = FlowConfig {
-            page_size: self.page_size,
-            margins: self.margins,
-            default_style: self.default_style,
+            page_size,
+            margins,
+            default_style,
             ..Default::default()
         };
         let mut engine = FlowLayoutEngine::new(config);
-        let mut model = engine.layout(&self.blocks);
-        model.image_store = self.image_store;
-        if let Some(title) = self.builder.get_title() {
+
+        let mut model = if let Some(mut model) = model_override {
+            if !blocks.is_empty() {
+                let mut appended = engine.layout(&blocks);
+                appended.image_store = image_store;
+                model.pages.extend(appended.pages);
+                model.resources.fonts.extend(appended.resources.fonts);
+                model.resources.images.extend(appended.resources.images);
+                model.image_store = merge_image_stores(&model.image_store, &appended.image_store);
+            } else if !image_store.is_empty() {
+                model.image_store = merge_image_stores(&model.image_store, &image_store);
+            }
+            model
+        } else {
+            let mut model = engine.layout(&blocks);
+            model.image_store = image_store;
+            model
+        };
+
+        if let Some(title) = builder.get_title() {
             model.metadata.title = Some(title.to_string());
         }
-        if let Some(author) = self.builder.get_author() {
+        if let Some(author) = builder.get_author() {
             model.metadata.author = Some(author.to_string());
         }
-        model.header = self.header.map(Box::new);
-        model.footer = self.footer.map(Box::new);
+        if let Some(header) = header {
+            model.header = Some(Box::new(header));
+        }
+        if let Some(footer) = footer {
+            model.footer = Some(Box::new(footer));
+        }
+        model.metadata.page_count = model.pages.len();
         model
     }
 
@@ -230,35 +266,40 @@ impl Document {
         let mut model = self.build();
         let other_model = other.build();
         model.pages.extend(other_model.pages);
+        model.resources.fonts.extend(other_model.resources.fonts);
+        model.resources.images.extend(other_model.resources.images);
         model.image_store = merge_image_stores(&model.image_store, &other_model.image_store);
         model.metadata.page_count = model.pages.len();
-        let mut builder = DocumentBuilder::new();
-        if let Some(ref title) = model.metadata.title {
-            builder = builder.title(title.clone());
-        }
-        if let Some(ref author) = model.metadata.author {
-            builder = builder.author(author.clone());
-        }
-        for page in model.pages {
-            builder = builder.add_page(page);
-        }
-        // Best-effort: returns a new Document that rebuilds from merged model
-        Document::new()
+        Self::from_model(model)
     }
 
-    /// Deserialize a document from JSON (limited reconstruction).
+    /// Deserialize a document from JSON.
     pub fn from_json(json: &str) -> Result<Self, CoreError> {
-        let model: DocumentModel = serde_json::from_str(json)
+        let mut model: DocumentModel = serde_json::from_str(json)
             .map_err(|e| CoreError::Serialization(format!("JSON parse failed: {}", e)))?;
+        model.metadata.page_count = model.pages.len();
+        model.validate()?;
+        Ok(Self::from_model(model))
+    }
+
+    fn from_model(model: DocumentModel) -> Self {
         let mut doc = Document::new();
+        if let Some(first_page) = model.pages.first() {
+            doc.page_size = PageSize::Custom {
+                width: first_page.size.width,
+                height: first_page.size.height,
+            };
+            doc.margins = first_page.margins;
+        }
         if let Some(ref title) = model.metadata.title {
-            doc = doc.title(title.clone());
+            doc.builder = doc.builder.title(title.clone());
         }
         if let Some(ref author) = model.metadata.author {
-            doc = doc.author(author.clone());
+            doc.builder = doc.builder.author(author.clone());
         }
-        let _ = model;
-        Ok(doc)
+        doc.image_store = model.image_store.clone();
+        doc.model_override = Some(model);
+        doc
     }
 }
 
@@ -841,6 +882,16 @@ impl TextSpan {
     pub fn set_italic(mut self, italic: bool) -> Self {
         self.style.italic = italic;
         self
+    }
+
+    /// Borrow this span's text content.
+    pub fn text(&self) -> &str {
+        &self.text
+    }
+
+    /// Borrow this span's style.
+    pub fn style(&self) -> &TextStyle {
+        &self.style
     }
 }
 

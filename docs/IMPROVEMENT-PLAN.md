@@ -1,8 +1,8 @@
 # perfect-print: Improvement Plan
 
-> **Status:** Active — 160 tests passing, 0 failures
-> **Date:** 2026-06-09
-> **Workspace:** `/Users/josephsee/clawd/perfect-print/`
+> **Status:** Active. The plan tracks completed work and remaining known gaps.
+> **Date:** 2026-06-14
+> **Workspace:** `/Users/josephsee/Documents/NewApps/perfect-print/`
 
 ## Gap Analysis
 
@@ -147,9 +147,9 @@
 5. JSON roundtrip (easy win)
 6. Style inheritance (polish)
 
-## Final Status
+## Current Status
 
-**All 6 improvement items completed. 185 tests, 0 failures.**
+Core build/test status should be verified with `cargo test --workspace`. Several earlier items are implemented, but the project is not yet a finished full-featured native print API.
 
 | # | Item | Status | Tests Added |
 |---|------|--------|-------------|
@@ -165,7 +165,7 @@
 - **Font embedding**: `pdf_has_embedded_font` test verifies `/FontFile2` and `/FontDescriptor` in PDF output. PDFs embed actual TrueType font data.
 - **Error types**: `PrintError` implements `std::error::Error` with `thiserror`, has `with_context()` for chaining, `is_not_found()` / `is_validation()` helpers. `ValidationResult` supports `Strictness::BestEffort/Warn/Exact`.
 - **Table measurement**: `TableEngine` uses `TextShaper` + `FontCache` for actual glyph width measurement instead of char-count estimates.
-- **JSON roundtrip**: `DocumentModel` serializes to JSON, deserializes back, and produces byte-identical JSON on re-serialization.
+- **JSON roundtrip**: `DocumentModel` serializes to JSON, deserializes back, and produces stable JSON at the model layer. The public `Document::from_json()` path now preserves pages and commands instead of returning an empty document.
 
 - Hyphenation (requires a hyphenation dictionary)
 - Fuzz testing (requires `cargo-fuzz` setup)

@@ -4,7 +4,7 @@ use perfect_print_core::document::DocumentBuilder;
 use perfect_print_core::document::PageBuilder;
 use perfect_print_core::page::PageSize;
 use perfect_print_core::units::Dpi;
-use perfect_print_core::{PrintWarning, Strictness, ValidationResult};
+use perfect_print_core::Strictness;
 use perfect_print_dialog::PrintDialog;
 use perfect_print_render::Render;
 use std::path::PathBuf;
@@ -465,7 +465,7 @@ fn main() -> Result<()> {
             tolerance,
         } => {
             let model = build_example(&example)?;
-            let dpi_val = dpi as u32;
+            let _dpi_val = dpi as u32;
 
             // Create a temporary directory for raster output
             let tmp_dir = std::env::temp_dir().join("pp_verify");
@@ -938,9 +938,7 @@ fn build_report() -> perfect_print_core::document::DocumentModel {
 
 fn build_worksheet() -> perfect_print_core::document::DocumentModel {
     use perfect_print_core::color::Color;
-    use perfect_print_core::draw::{
-        DrawCommand, FillRule, LineCap, LineJoin, PathOp, TextRun, TextStyle,
-    };
+    use perfect_print_core::draw::{DrawCommand, LineCap, LineJoin, PathOp, TextRun, TextStyle};
     use perfect_print_core::font::FontRef;
     use perfect_print_core::units::Point;
 
@@ -1004,7 +1002,7 @@ fn build_worksheet() -> perfect_print_core::document::DocumentModel {
 
 fn build_labels() -> perfect_print_core::document::DocumentModel {
     use perfect_print_core::color::Color;
-    use perfect_print_core::draw::{DrawCommand, LineCap, LineJoin, PathOp, TextRun, TextStyle};
+    use perfect_print_core::draw::{DrawCommand, LineCap, LineJoin, TextRun, TextStyle};
     use perfect_print_core::font::FontRef;
     use perfect_print_core::units::Point;
 

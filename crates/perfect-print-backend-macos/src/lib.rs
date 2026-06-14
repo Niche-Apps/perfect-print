@@ -10,7 +10,7 @@
 
 use perfect_print_core::page::PageSize;
 use perfect_print_dialog::{
-    ColorMode, DuplexMode, PageOrientation, PageRange, PrintDialog, PrintDialogResult, PrintError,
+    DuplexMode, PageOrientation, PageRange, PrintDialog, PrintDialogResult, PrintError,
     PrintScaling, PrintSettings, Printer, PrinterCapabilities, PrinterState,
 };
 use std::process::Command;

@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-use crate::units::{Length, Size};
+use crate::units::Size;
 
 /// Standard page sizes in points (1/72 inch).
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]

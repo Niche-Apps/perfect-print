@@ -18,7 +18,6 @@ use perfect_print_core::resource::ImageStore;
 use perfect_print_core::units::{Dpi, Point, Rect};
 use perfect_print_pdf::PdfRenderer;
 use perfect_print_render::{Render, TinySkiaRenderer};
-use std::path::Path;
 
 /// Helper: render a document to PNG bytes (first page only).
 fn render_to_png(model: &perfect_print_core::document::DocumentModel, dpi: f64) -> Vec<u8> {
@@ -201,7 +200,7 @@ fn golden_pdf_page_count() {
     let pdf_bytes = render_to_pdf_bytes(&model);
     let pdf_str = String::from_utf8_lossy(&pdf_bytes);
     // Count /Type /Page in the PDF
-    let page_count = pdf_str.matches("/Type /Page").count();
+    let _page_count = pdf_str.matches("/Type /Page").count();
     // Subtract 1 for the /Type /Pages node (which also contains "/Type /")
     // Actually, lopdf writes "Type Page" not "/Type /Page"
     // Let's just check for the page count in the dictionary

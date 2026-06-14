@@ -16,6 +16,7 @@ perfect-print-pdf = { path = "../perfect-print-pdf" }
 perfect-print-dialog = { path = "../perfect-print-dialog" }
 perfect-print = { path = "../perfect-print" }
 lopdf = { workspace = true }
+image = { workspace = true }
 
 [dev-dependencies]
 insta = { workspace = true }

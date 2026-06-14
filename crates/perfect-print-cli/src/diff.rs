@@ -9,6 +9,7 @@
 use std::path::Path;
 
 /// Result of a visual diff comparison.
+#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub struct DiffResult {
     /// Whether the images match within tolerance.
@@ -203,6 +204,7 @@ pub fn generate_heatmap(
 /// Compare all PNG files in two directories.
 ///
 /// Files are matched by name. Returns a result for each pair.
+#[allow(dead_code)]
 pub fn compare_directories(
     dir_a: &Path,
     dir_b: &Path,

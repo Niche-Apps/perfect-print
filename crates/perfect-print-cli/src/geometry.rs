@@ -12,6 +12,7 @@ use perfect_print_core::draw::DrawCommand;
 use perfect_print_core::units::Rect;
 
 /// A geometry assertion to verify against a document.
+#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub enum GeometryAssertion {
     /// Verify the total number of pages.
@@ -50,6 +51,7 @@ pub enum GeometryAssertion {
 }
 
 /// Result of running a geometry assertion.
+#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub struct AssertionResult {
     pub assertion: GeometryAssertion,
@@ -271,6 +273,7 @@ pub fn check_all(model: &DocumentModel, assertions: &[GeometryAssertion]) -> Vec
 }
 
 /// Run assertions and return Ok(()) if all pass, or Err with summary if any fail.
+#[allow(dead_code)]
 pub fn verify_all(model: &DocumentModel, assertions: &[GeometryAssertion]) -> Result<(), String> {
     let results = check_all(model, assertions);
     let failures: Vec<_> = results.iter().filter(|r| !r.passed).collect();

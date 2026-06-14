@@ -55,12 +55,12 @@ impl FontCache {
 
         let face_id = self.db.query(&query)?;
         let font_bytes = self.db.with_face_data(face_id, |data, _| data.to_vec())?;
-        let face = Face::from_slice(&font_bytes, 0).ok()?;
+        let face = Face::parse(&font_bytes, 0).ok()?;
         let units_per_em = face.units_per_em();
 
         // Leak the font data to get 'static lifetime for Face
         let font_data_static: &'static [u8] = Box::leak(font_bytes.into_boxed_slice());
-        let face_static = Face::from_slice(font_data_static, 0).ok()?;
+        let face_static = Face::parse(font_data_static, 0).ok()?;
 
         let cached = Arc::new(CachedFont {
             face: face_static,
@@ -90,11 +90,6 @@ impl FontCache {
         // Note: We can't easily cache in the Arc since it's immutable
         // For now, just return the path each time
         Some(path)
-    }
-
-    /// Get the units_per_em for a loaded font.
-    fn get_units_per_em(&self, font_ref: &FontRef) -> Option<u16> {
-        self.fonts.get(font_ref.as_ref()).map(|f| f.units_per_em)
     }
 }
 
@@ -298,38 +293,94 @@ impl TinySkiaRenderer {
 
                 let mut font_cache = self.font_cache.lock().unwrap();
 
-                let units_per_em = font_cache.get_units_per_em(font_ref).unwrap_or(1000) as f32;
+                let loaded_font = font_cache.load_font(font_ref);
+                let units_per_em = loaded_font
+                    .as_ref()
+                    .map(|font| font.units_per_em)
+                    .unwrap_or(1000) as f32;
 
                 let mut pen_x = position.x;
                 let mut pen_y = position.y;
 
-                for glyph in &run.glyphs {
-                    if let Some(glyph_path) = font_cache.get_glyph_path(font_ref, glyph.glyph_id) {
-                        let glyph_x = pen_x + glyph.x_offset;
-                        let glyph_y = pen_y + glyph.y_offset;
+                if run.glyphs.is_empty() && !run.text.is_empty() {
+                    if let Some(font) = loaded_font.as_ref() {
+                        for ch in run.text.chars() {
+                            if ch == '\n' {
+                                pen_x = position.x;
+                                pen_y += run.style.line_height.unwrap_or(run.style.size * 1.2);
+                                continue;
+                            }
+                            if let Some(glyph_id) = font.face.glyph_index(ch).map(|id| id.0 as u32)
+                            {
+                                if let Some(glyph_path) =
+                                    font_cache.get_glyph_path(font_ref, glyph_id)
+                                {
+                                    let glyph_transform = Transform::from_scale(
+                                        font_size / units_per_em,
+                                        -font_size / units_per_em,
+                                    )
+                                    .post_concat(Transform::from_translate(
+                                        pen_x as f32,
+                                        pen_y as f32,
+                                    ))
+                                    .post_concat(state.transform);
 
-                        let glyph_transform = Transform::from_scale(
-                            font_size / units_per_em,
-                            -font_size / units_per_em,
-                        )
-                        .post_concat(Transform::from_translate(glyph_x as f32, glyph_y as f32))
-                        .post_concat(state.transform);
+                                    let mut paint = Paint::default();
+                                    paint.set_color(color);
+                                    paint.anti_alias = true;
 
-                        let mut paint = Paint::default();
-                        paint.set_color(color);
-                        paint.anti_alias = true;
-
-                        pixmap.fill_path(
-                            &glyph_path,
-                            &paint,
-                            tiny_skia::FillRule::Winding,
-                            glyph_transform,
-                            None,
-                        );
+                                    pixmap.fill_path(
+                                        &glyph_path,
+                                        &paint,
+                                        tiny_skia::FillRule::Winding,
+                                        glyph_transform,
+                                        None,
+                                    );
+                                }
+                                let advance = font
+                                    .face
+                                    .glyph_hor_advance(ttf_parser::GlyphId(glyph_id as u16))
+                                    .map(|advance| {
+                                        advance as f64 * run.style.size / font.units_per_em as f64
+                                    })
+                                    .unwrap_or(run.style.size * 0.5);
+                                pen_x += advance;
+                            } else {
+                                pen_x += run.style.size * 0.5;
+                            }
+                        }
                     }
+                } else {
+                    for glyph in &run.glyphs {
+                        if let Some(glyph_path) =
+                            font_cache.get_glyph_path(font_ref, glyph.glyph_id)
+                        {
+                            let glyph_x = pen_x + glyph.x_offset;
+                            let glyph_y = pen_y + glyph.y_offset;
 
-                    pen_x += glyph.x_advance;
-                    pen_y += glyph.y_advance;
+                            let glyph_transform = Transform::from_scale(
+                                font_size / units_per_em,
+                                -font_size / units_per_em,
+                            )
+                            .post_concat(Transform::from_translate(glyph_x as f32, glyph_y as f32))
+                            .post_concat(state.transform);
+
+                            let mut paint = Paint::default();
+                            paint.set_color(color);
+                            paint.anti_alias = true;
+
+                            pixmap.fill_path(
+                                &glyph_path,
+                                &paint,
+                                tiny_skia::FillRule::Winding,
+                                glyph_transform,
+                                None,
+                            );
+                        }
+
+                        pen_x += glyph.x_advance;
+                        pen_y += glyph.y_advance;
+                    }
                 }
             }
             DrawCommand::Image {
@@ -352,8 +403,8 @@ impl TinySkiaRenderer {
                     .unwrap();
 
                     // Compute the destination rectangle in screen space
-                    let scale_x = dest_rect.width / image_data.width as f64;
-                    let scale_y = dest_rect.height / image_data.height as f64;
+                    let _scale_x = dest_rect.width / image_data.width as f64;
+                    let _scale_y = dest_rect.height / image_data.height as f64;
 
                     let screen_w =
                         (dest_rect.width * state.transform.sx as f64).abs().max(1.0) as u32;
@@ -617,13 +668,10 @@ mod tests {
         let mut cache = FontCache::new();
         let font_ref = perfect_print_core::font::FontRef::new("Helvetica");
 
-        // Load the font
-        let _ = cache.load_font(&font_ref);
-
-        // Check units_per_em is a reasonable value (typically 1000 or 2048)
-        let upem = cache.get_units_per_em(&font_ref);
-        assert!(upem.is_some());
-        let upem = upem.unwrap();
+        // Load the font and check units_per_em is a reasonable value (typically 1000 or 2048).
+        let font = cache.load_font(&font_ref);
+        assert!(font.is_some());
+        let upem = font.unwrap().units_per_em;
         assert!(upem > 0, "units_per_em must be positive");
         assert!(upem <= 10000, "units_per_em should be reasonable (<=10000)");
     }

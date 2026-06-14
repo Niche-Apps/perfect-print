@@ -163,10 +163,10 @@ macOS print APIs available via Rust:
 - `PMPrinter` / `PMPrintSession` - lower-level Carbon Print Manager (deprecated but functional)
 - `CGPDFContext` + `NSPrintOperation` - render PDF then print it
 
-**Recommended approach for macOS:**
-1. Generate PDF data from canonical page model
-2. Use `NSPrintOperation` with PDF data for native print dialog
-3. This guarantees WYSIWYG because the same PDF is used for preview, export, and print
+**Current practical macOS approach:**
+1. Generate a PDF/output artifact from the canonical page model
+2. Submit through the CUPS CLI bridge (`lp`/`lpstat`/`cancel`)
+3. Track native `NSPrintOperation` support as a future GUI backend, not current functionality
 
 ## Recommendation
 
@@ -188,12 +188,12 @@ macOS print APIs available via Rust:
 - Pure Rust core with `rustybuzz` for text shaping
 - `tiny-skia` for raster output (pure Rust, no system deps)
 - Custom PDF writer for PDF output (or `lopdf` + `rusttype` for font embedding)
-- Platform-specific native print backends that render the canonical model to PDF, then submit via OS print APIs
+- Platform-specific print backends that render the canonical model to PDF/output artifacts, then submit via OS print systems
 
 This gives us:
 - No system library dependencies
-- Excellent text shaping
-- True WYSIWYG (same model -> PDF -> print)
+- Excellent text shaping foundations
+- Measurable parity checks from a shared model
 - Cross-platform
 - Small binary size
 - Easy `cargo add perfect-print` experience

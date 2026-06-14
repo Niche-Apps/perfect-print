@@ -6,12 +6,7 @@
 //! - `cupsGetJobs` / `cupsFreeJobs` for job tracking
 //! - `cupsCancelJob` for job cancellation
 
-use perfect_print_core::page::PageSize;
-use perfect_print_dialog::{
-    ColorMode, DuplexMode, PageOrientation, PageRange, PrintDialog, PrintDialogResult, PrintError,
-    PrintScaling, PrintSettings, Printer, PrinterCapabilities, PrinterState,
-};
-use std::ffi::CString;
+use perfect_print_dialog::{PrintDialog, PrintDialogResult, PrintError, PrintSettings, Printer};
 use std::path::Path;
 
 #[cfg(target_os = "linux")]

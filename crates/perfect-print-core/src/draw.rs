@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::color::Color;
 use crate::font::FontRef;
-use crate::units::{Point, Rect, Size};
+use crate::units::{Point, Rect};
 
 /// Text alignment within its bounding area.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]

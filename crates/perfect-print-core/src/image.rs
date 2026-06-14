@@ -155,7 +155,7 @@ impl ImageData {
         let mut buf = Vec::new();
         let quality = quality.clamp(1, 100);
         use image::ImageEncoder;
-        let mut encoder = image::codecs::jpeg::JpegEncoder::new_with_quality(&mut buf, quality);
+        let encoder = image::codecs::jpeg::JpegEncoder::new_with_quality(&mut buf, quality);
         encoder
             .write_image(
                 &rgb_buf,

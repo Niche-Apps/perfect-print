@@ -8,12 +8,10 @@
 
 use perfect_print_core::color::Color;
 use perfect_print_core::document::{DocumentBuilder, DocumentModel};
-use perfect_print_core::draw::{DrawCommand, TextAlign, TextRun, TextStyle};
-use perfect_print_core::font::FontRef;
+use perfect_print_core::draw::{DrawCommand, ShapedGlyph, TextAlign, TextRun, TextStyle};
 use perfect_print_core::page::{Layer, Margins, Page, PageSize};
 use perfect_print_core::units::{Point, Rect};
 
-use crate::font_loader::FontCache;
 use crate::paragraph::{Line, ParagraphEngine};
 
 /// A block of content to be laid out in the flow.
@@ -96,7 +94,6 @@ pub struct PositionedBlock {
 pub struct FlowLayoutEngine {
     config: FlowConfig,
     paragraph_engine: ParagraphEngine,
-    font_cache: FontCache,
 }
 
 impl FlowLayoutEngine {
@@ -104,7 +101,6 @@ impl FlowLayoutEngine {
         Self {
             config,
             paragraph_engine: ParagraphEngine::new(),
-            font_cache: FontCache::default(),
         }
     }
 
@@ -362,13 +358,34 @@ impl FlowLayoutEngine {
 fn line_to_draw_command(line: &Line, y: f64, x_offset: f64) -> DrawCommand {
     DrawCommand::Text {
         run: TextRun {
-            text: String::new(),
-            glyphs: vec![],
+            text: line.text.clone(),
+            glyphs: positioned_line_glyphs(line, x_offset),
             style: line.style.clone(),
         },
         position: Point::new(x_offset, y + line.baseline_y),
         max_width: Some(line.width),
     }
+}
+
+fn positioned_line_glyphs(line: &Line, base_x: f64) -> Vec<ShapedGlyph> {
+    if line.shaped_glyphs.is_empty() {
+        return Vec::new();
+    }
+
+    let mut expected_x = 0.0;
+    line.glyphs
+        .iter()
+        .zip(line.shaped_glyphs.iter())
+        .map(|(positioned, shaped)| {
+            let mut glyph = shaped.clone();
+            glyph.x_offset += positioned.x - base_x - expected_x;
+            glyph.y_offset += positioned.y;
+            glyph.x_advance = shaped.x_advance;
+            glyph.y_advance = shaped.y_advance;
+            expected_x += shaped.x_advance;
+            glyph
+        })
+        .collect()
 }
 
 /// Merge a paragraph style with a document default style.
@@ -410,6 +427,7 @@ fn merge_styles(default: &TextStyle, paragraph: &TextStyle) -> TextStyle {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use perfect_print_core::font::FontRef;
 
     fn test_style() -> TextStyle {
         TextStyle::new(FontRef::new("Helvetica"), 12.0)
@@ -610,7 +628,6 @@ mod tests {
 
     #[test]
     fn test_style_inheritance() {
-        use perfect_print_core::draw::TextAlign;
         use perfect_print_core::font::FontRef;
 
         // Set up a document with a default style
@@ -836,10 +853,12 @@ mod tests {
 
 /// Simple deterministic RNG for fuzz testing (no external deps).
 /// Uses a basic xorshift algorithm.
+#[cfg(test)]
 struct SimpleRng {
     state: u64,
 }
 
+#[cfg(test)]
 impl SimpleRng {
     fn new(seed: u64) -> Self {
         Self { state: seed.max(1) }

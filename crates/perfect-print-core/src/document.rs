@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::draw::DrawCommand;
 use crate::error::{CoreError, CoreResult};
-use crate::page::{Layer, LayerType, Margins, Page, PageSize};
+use crate::page::{Layer, LayerType, Page, PageSize};
 use crate::resource::{ImageStore, ResourceStore};
 use crate::units::Size;
 
@@ -216,10 +216,6 @@ impl PageBuilder for Page {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::color::Color;
-    use crate::draw::{ShapedGlyph, TextRun, TextStyle};
-    use crate::font::FontRef;
-    use crate::units::Point;
 
     #[test]
     fn empty_document_fails_validation() {

@@ -1,4 +1,4 @@
-use perfect_print_core::draw::{TextAlign, TextStyle};
+use perfect_print_core::draw::{ShapedGlyph, TextAlign, TextStyle};
 use perfect_print_core::font::FontRef;
 use rustybuzz::Direction;
 
@@ -18,7 +18,11 @@ pub struct PositionedGlyph {
 /// A line of shaped text.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Line {
+    /// Original text for this laid-out line.
+    pub text: String,
     pub glyphs: Vec<PositionedGlyph>,
+    /// Shaped glyphs from rustybuzz, preserving cluster and offset data for renderers.
+    pub shaped_glyphs: Vec<ShapedGlyph>,
     pub width: f64,
     pub height: f64,
     pub baseline_y: f64,
@@ -36,9 +40,22 @@ impl Line {
         baseline_y: f64,
         style: TextStyle,
     ) -> Self {
+        Self::from_parts(String::new(), glyphs, Vec::new(), height, baseline_y, style)
+    }
+
+    pub fn from_parts(
+        text: String,
+        glyphs: Vec<PositionedGlyph>,
+        shaped_glyphs: Vec<ShapedGlyph>,
+        height: f64,
+        baseline_y: f64,
+        style: TextStyle,
+    ) -> Self {
         let width = glyphs.iter().map(|g| g.advance).sum();
         Self {
+            text,
             glyphs,
+            shaped_glyphs,
             width,
             height,
             baseline_y,
@@ -245,7 +262,9 @@ impl ParagraphEngine {
             self.shaper.shape(text, style.size, &font)
         };
         if glyphs.is_empty() {
-            return Some(Line::new(
+            return Some(Line::from_parts(
+                text.to_string(),
+                vec![],
                 vec![],
                 style.size * 1.2,
                 style.size,
@@ -295,8 +314,15 @@ impl ParagraphEngine {
 
         let line_height = style.line_height.unwrap_or(style.size * 1.2);
         Some(
-            Line::new(positioned, line_height, style.size, style.clone())
-                .with_space_indices(space_indices),
+            Line::from_parts(
+                text.to_string(),
+                positioned,
+                glyphs,
+                line_height,
+                style.size,
+                style.clone(),
+            )
+            .with_space_indices(space_indices),
         )
     }
 
@@ -512,38 +538,73 @@ impl ParagraphEngine {
 
     fn layout_word_run(&mut self, words: &[(String, TextStyle)], _max_width: f64) -> Line {
         let mut positioned = Vec::new();
+        let mut shaped_glyphs = Vec::new();
         let mut x = 0.0;
         let mut max_height: f64 = 0.0;
         let mut last_style = TextStyle::new(FontRef::new("Helvetica"), 12.0);
 
-        for (word, style) in words {
+        for (index, (word, style)) in words.iter().enumerate() {
             let line_height = style.line_height.unwrap_or(style.size * 1.2);
             max_height = max_height.max(line_height);
             last_style = style.clone();
 
-            // Use shaped text width instead of char-count estimate
             let font = self.font_cache.get_by_family(style.font.as_ref());
-            let shaped_width = font
+            let word_glyphs = font
                 .as_ref()
-                .map(|f| self.shaper.measure_width(word, style.size, f))
-                .unwrap_or_else(|| word.len() as f64 * style.size * 0.5);
+                .map(|font| {
+                    self.shaper
+                        .shape_bidi(word, style.size, font, self.config.base_direction)
+                })
+                .unwrap_or_default();
 
-            positioned.push(PositionedGlyph {
-                glyph_id: 0,
-                x,
-                y: 0.0,
-                advance: shaped_width,
-                font_index: 0,
-            });
-            // Use shaped space width
-            let space_w = font
-                .as_ref()
-                .map(|f| self.shaper.measure_width(" ", style.size, f))
-                .unwrap_or(style.size * 0.3);
-            x += shaped_width + space_w;
+            if word_glyphs.is_empty() {
+                let fallback_width = word.len() as f64 * style.size * 0.5;
+                positioned.push(PositionedGlyph {
+                    glyph_id: 0,
+                    x,
+                    y: 0.0,
+                    advance: fallback_width,
+                    font_index: 0,
+                });
+                x += fallback_width;
+            } else {
+                let mut pen_x = x;
+                for glyph in word_glyphs {
+                    positioned.push(PositionedGlyph {
+                        glyph_id: glyph.glyph_id,
+                        x: pen_x + glyph.x_offset,
+                        y: glyph.y_offset,
+                        advance: glyph.x_advance,
+                        font_index: glyph.font_index,
+                    });
+                    pen_x += glyph.x_advance;
+                    shaped_glyphs.push(glyph);
+                }
+                x = pen_x;
+            }
+
+            if index + 1 < words.len() {
+                let space_w = font
+                    .as_ref()
+                    .map(|f| self.shaper.measure_width(" ", style.size, f))
+                    .unwrap_or(style.size * 0.3);
+                x += space_w;
+            }
         }
 
-        Line::new(positioned, max_height, max_height * 0.8, last_style)
+        let text = words
+            .iter()
+            .map(|(word, _)| word.as_str())
+            .collect::<Vec<_>>()
+            .join(" ");
+        Line::from_parts(
+            text,
+            positioned,
+            shaped_glyphs,
+            max_height,
+            max_height * 0.8,
+            last_style,
+        )
     }
 
     fn load_font(&mut self, style: &TextStyle) -> Option<LoadedFont> {
@@ -628,6 +689,32 @@ mod tests {
         let text = "Hello World test paragraph wrapping";
         let layout = engine.layout_paragraph(text, &test_style(), 80.0);
         assert!(layout.line_count() >= 2, "Should wrap to multiple lines");
+    }
+
+    #[test]
+    fn test_layout_runs_preserves_shaped_glyphs() {
+        let mut engine = ParagraphEngine::new();
+        let mut bold = test_style();
+        bold.bold = true;
+        let mut italic = test_style();
+        italic.italic = true;
+
+        let layout = engine.layout_runs(
+            &[("Hello".to_string(), bold), ("world".to_string(), italic)],
+            500.0,
+        );
+
+        let line = layout
+            .lines
+            .first()
+            .expect("mixed runs should produce a line");
+        assert_eq!(line.text, "Hello world");
+        assert!(!line.glyphs.is_empty());
+        assert!(
+            !line.shaped_glyphs.is_empty(),
+            "mixed-style run layout must preserve shaped glyphs for renderers"
+        );
+        assert_eq!(line.glyphs.len(), line.shaped_glyphs.len());
     }
 
     #[test]

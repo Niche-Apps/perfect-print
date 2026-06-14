@@ -1,10 +1,12 @@
 # perfect-print
 
-**The best native print API in any programming language.**
+**A Rust print/document rendering API with PDF, PNG, CLI, and print-backend support.**
 
-A Rust developer can create a document in under 20 lines, preview it, export to PDF,
-open a native print dialog, and print — all from one canonical page model with
-measurable WYSIWYG output.
+A Rust developer can create a document in under 20 lines, export it to PDF,
+render PNG previews, and submit print jobs through the available backend. The
+project uses one canonical page model so output paths can be measured and tested
+against each other. Native GUI print dialogs are still backend-specific work in
+progress.
 
 ## Quick Start
 
@@ -29,11 +31,11 @@ let paths = doc.render_png("output-pages", 300)?;
 
 - **One canonical page model** — PDF, raster, preview, and print all consume the same model
 - **Exact units** — points, inches, mm, px-at-DPI
-- **High-quality text shaping** — rustybuzz-powered with bidi, ligatures, kerning, font fallback
+- **Text shaping** — rustybuzz-powered shaping with bidi, ligatures, and kerning foundations
 - **Image support** — PNG/JPEG loading, rendering in both raster and PDF backends
-- **PDF output** — with embedded images (FlateDecode XObjects) and shaped text (TJ arrays)
+- **PDF output** — with embedded images (FlateDecode XObjects) and text output
 - **Raster output** — via tiny-skia, any DPI
-- **Native print backend** — macOS via CUPS (`lp`/`lpstat`)
+- **Print backend** — macOS via CUPS (`lp`/`lpstat`); other backends are still maturing
 - **Visual diff CLI** — pixel-by-pixel PNG comparison with heatmaps
 - **Geometry assertions** — structured checks for page size, content bounds, text baselines
 - **Deterministic output** — identical documents produce byte-identical bytes
@@ -59,7 +61,7 @@ perfect-print-cli/      CLI for render, verify, print, diagnostics, printers
 # Build everything
 cargo build --workspace
 
-# Run all tests (143 tests, 0 failures)
+# Run all tests
 cargo test --workspace
 
 # Render an example to PDF + PNG
@@ -113,16 +115,16 @@ doc.save_pdf("catalog.pdf")?;
 
 ## Crate Structure
 
-| Crate | Purpose | Tests |
-|-------|---------|-------|
-| `perfect-print` | Public ergonomic API | 11 |
-| `perfect-print-core` | Canonical model, units, draw commands | 23 |
-| `perfect-print-layout` | Text shaping, flow, tables | 18 |
-| `perfect-print-render` | Raster rendering (tiny-skia) | 6 |
-| `perfect-print-pdf` | PDF generation (lopdf) | 4 |
-| `perfect-print-dialog` | Print settings, capabilities | 15 |
-| `perfect-print-backend-macos` | macOS CUPS backend | 6 |
-| `perfect-print-cli` | CLI + golden tests | 56 |
+| Crate | Purpose |
+|-------|---------|
+| `perfect-print` | Public ergonomic API |
+| `perfect-print-core` | Canonical model, units, draw commands |
+| `perfect-print-layout` | Text shaping, flow, tables |
+| `perfect-print-render` | Raster rendering (tiny-skia) |
+| `perfect-print-pdf` | PDF generation (lopdf) |
+| `perfect-print-dialog` | Print settings, capabilities |
+| `perfect-print-backend-macos` | macOS CUPS backend |
+| `perfect-print-cli` | CLI + golden tests |
 
 ## License
 

@@ -9,8 +9,8 @@ We need to choose the rendering stack for perfect-print. The library must:
 1. Shape text correctly for Latin, CJK, Arabic, Hebrew, emoji, bidi
 2. Generate PDF output
 3. Generate raster (PNG) output
-4. Support native print dialogs and job submission
-5. Guarantee WYSIWYG across all output paths
+4. Support print job submission, with native dialogs as a future/backend-specific capability
+5. Enable measurable parity checks across output paths
 6. Work cross-platform (macOS, Linux, Windows)
 7. Be easy to depend on (`cargo add perfect-print`)
 
@@ -24,7 +24,7 @@ We will use a **hybrid pure-Rust approach** with platform-specific native print 
 | Font loading | `ttf-parser` + `fontdb` | Lightweight, cross-platform font discovery |
 | Vector/PDF output | Custom PDF writer on `lopdf` | Full control over PDF generation, font embedding, subsetting |
 | Raster output | `tiny-skia` | Pure Rust, Skia subset, no system deps, handles paths/text/images |
-| Native print (macOS) | `NSPrintOperation` via `objc2-foundation` | Submit rendered PDF data via native dialog |
+| Native print (macOS) | CUPS CLI bridge (`lp`/`lpstat`/`cancel`) | Practical job submission and inspection without Objective-C bindings |
 | Native print (Linux) | `cups-sys` / IPP protocol | CUPS is the standard Linux print system |
 
 ## Consequences
@@ -33,8 +33,8 @@ We will use a **hybrid pure-Rust approach** with platform-specific native print 
 - Pure Rust core = easy builds, no system dependencies
 - `rustybuzz` = best-in-class text shaping
 - `tiny-skia` = battle-tested rasterization (used by `resvg`, `iced`)
-- Same canonical page model feeds all backends = true WYSIWYG
-- Native print backends submit PDF data = guaranteed print accuracy
+- Same canonical page model feeds all backends, which enables measurable parity checks
+- Print backends can submit the generated PDF/output artifact through platform print systems
 
 ### Negative
 - Custom PDF writer is significant engineering effort (PDF spec is complex)
