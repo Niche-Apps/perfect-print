@@ -1,0 +1,20 @@
+[package]
+name = "perfect-print-iced"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "iced integration for perfect-print"
+
+[features]
+default = ["iced"]
+iced = ["dep:iced", "dep:image"]
+
+[dependencies]
+perfect-print-core = { path = "../perfect-print-core" }
+perfect-print-render = { path = "../perfect-print-render" }
+log = { workspace = true }
+iced = { version = "0.13", features = ["image"], optional = true }
+image = { version = "0.25", optional = true }

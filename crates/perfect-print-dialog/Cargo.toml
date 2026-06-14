@@ -1,0 +1,14 @@
+[package]
+name = "perfect-print-dialog"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "Printer settings, printer capabilities, native dialog abstraction"
+
+[dependencies]
+perfect-print-core = { path = "../perfect-print-core" }
+thiserror = { workspace = true }
+log = { workspace = true }

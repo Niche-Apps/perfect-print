@@ -1,0 +1,13 @@
+[package]
+name = "pp-proto-cairo"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "proto-cairo"
+path = "src/main.rs"
+
+[dependencies]
+cairo-rs = { version = "0.20", features = ["pdf", "png"] }
+pango = "0.20"
+pangocairo = "0.20"

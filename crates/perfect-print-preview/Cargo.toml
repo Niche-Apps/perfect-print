@@ -1,0 +1,15 @@
+[package]
+name = "perfect-print-preview"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "Preview support"
+
+[dependencies]
+perfect-print-core = { path = "../perfect-print-core" }
+perfect-print-render = { path = "../perfect-print-render" }
+perfect-print-pdf = { path = "../perfect-print-pdf" }
+log = { workspace = true }

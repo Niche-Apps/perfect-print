@@ -1,0 +1,11 @@
+[package]
+name = "pp-proto-shaping"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "proto-shaping"
+path = "src/main.rs"
+
+[dependencies]
+rustybuzz = "0.20"

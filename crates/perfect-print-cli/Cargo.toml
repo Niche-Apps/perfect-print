@@ -1,0 +1,34 @@
+[package]
+name = "perfect-print-cli"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "CLI for render, verify, printers, capabilities, print, diagnostics"
+
+[[bin]]
+name = "perfect-print-cli"
+path = "src/main.rs"
+
+[dependencies]
+perfect-print-core = { path = "../perfect-print-core" }
+perfect-print-layout = { path = "../perfect-print-layout" }
+perfect-print-render = { path = "../perfect-print-render" }
+perfect-print-pdf = { path = "../perfect-print-pdf" }
+perfect-print-dialog = { path = "../perfect-print-dialog" }
+clap = { workspace = true }
+env_logger = { workspace = true }
+anyhow = { workspace = true }
+image = { workspace = true }
+log = { workspace = true }
+serde_json = { workspace = true }
+zip = { version = "0.6", default-features = false, features = ["deflate"] }
+chrono = "0.4"
+
+[dev-dependencies]
+insta = { workspace = true }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+perfect-print-backend-macos = { path = "../perfect-print-backend-macos" }

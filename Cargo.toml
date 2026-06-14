@@ -1,0 +1,80 @@
+[workspace]
+resolver = "2"
+
+members = [
+    "crates/perfect-print",
+    "crates/perfect-print-core",
+    "crates/perfect-print-layout",
+    "crates/perfect-print-render",
+    "crates/perfect-print-pdf",
+    "crates/perfect-print-dialog",
+    "crates/perfect-print-backend-macos",
+    "crates/perfect-print-backend-windows",
+    "crates/perfect-print-backend-linux",
+    "crates/perfect-print-preview",
+    "crates/perfect-print-tauri",
+    "crates/perfect-print-egui",
+    "crates/perfect-print-iced",
+    "crates/perfect-print-cli",
+    "crates/perfect-print-integration",
+    "crates/perfect-print-barcode",
+    "fuzz",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.75"
+license = "MIT OR Apache-2.0"
+authors = ["perfect-print contributors"]
+repository = "https://github.com/perfect-print/perfect-print"
+description = "The best native print API in any programming language"
+
+[workspace.dependencies]
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# Errors
+thiserror = "2"
+anyhow = "1"
+
+# Text shaping
+rustybuzz = "0.20"
+ttf-parser = "0.25"
+unicode-bidi = "0.3"
+
+# Font management
+fontdb = "0.21"
+
+# PDF
+lopdf = "0.34"
+
+# Raster
+tiny-skia = "0.11"
+image = "0.25"
+
+# Logging
+log = "0.4"
+env_logger = "0.11"
+
+# CLI
+clap = { version = "4", features = ["derive"] }
+
+# Testing
+insta = { version = "1", features = ["json"] }
+approx = "0.5"
+
+# macOS (used by backend-macos via platform-specific deps)
+objc2 = "0.6"
+objc2-foundation = "0.3"
+objc2-app-kit = "0.2"
+core-graphics = "0.24"
+core-text = "21"
+core-foundation = "0.10"
+
+# Linux (used by backend-linux)
+cups-sys = "0.1"
+
+# Windows (used by backend-windows)
+windows = { version = "0.58", features = ["Win32_Graphics_Printing"] }

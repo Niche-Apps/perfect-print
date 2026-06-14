@@ -1,0 +1,15 @@
+[package]
+name = "perfect-print-barcode"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "Barcode and QR code generation for perfect-print"
+
+[dependencies]
+perfect-print-core = { path = "../perfect-print-core" }
+tiny-skia = { workspace = true }
+qrcodegen = "1.8"
+barcoders = { version = "2.0", features = ["image"] }

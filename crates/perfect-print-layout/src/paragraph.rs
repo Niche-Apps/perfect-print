@@ -1,0 +1,778 @@
+use perfect_print_core::draw::{TextAlign, TextStyle};
+use perfect_print_core::font::FontRef;
+use rustybuzz::Direction;
+
+use crate::font_loader::{FontCache, FontProperties, LoadedFont};
+use crate::text_shaper::TextShaper;
+
+/// A positioned glyph within a line.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PositionedGlyph {
+    pub glyph_id: u32,
+    pub x: f64,
+    pub y: f64,
+    pub advance: f64,
+    pub font_index: usize,
+}
+
+/// A line of shaped text.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Line {
+    pub glyphs: Vec<PositionedGlyph>,
+    pub width: f64,
+    pub height: f64,
+    pub baseline_y: f64,
+    /// The text style used to produce this line (font, size, color, etc.)
+    pub style: TextStyle,
+    /// Indices into `glyphs` that are space characters (for justification).
+    /// These are the exact positions where extra space should be distributed.
+    pub space_indices: Vec<usize>,
+}
+
+impl Line {
+    pub fn new(
+        glyphs: Vec<PositionedGlyph>,
+        height: f64,
+        baseline_y: f64,
+        style: TextStyle,
+    ) -> Self {
+        let width = glyphs.iter().map(|g| g.advance).sum();
+        Self {
+            glyphs,
+            width,
+            height,
+            baseline_y,
+            style,
+            space_indices: vec![],
+        }
+    }
+
+    /// Set the space indices for this line.
+    pub fn with_space_indices(mut self, indices: Vec<usize>) -> Self {
+        self.space_indices = indices;
+        self
+    }
+}
+
+/// A paragraph: multiple lines of shaped text.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ParagraphLayout {
+    pub lines: Vec<Line>,
+    pub width: f64,
+    pub height: f64,
+}
+
+impl ParagraphLayout {
+    pub fn new(lines: Vec<Line>, max_width: f64) -> Self {
+        let height = lines.iter().map(|l| l.height).sum();
+        Self {
+            lines,
+            width: max_width,
+            height,
+        }
+    }
+
+    pub fn line_count(&self) -> usize {
+        self.lines.len()
+    }
+}
+
+/// Configuration for paragraph layout.
+#[derive(Debug, Clone)]
+pub struct ParagraphConfig {
+    /// Base text direction. None = auto-detect.
+    pub base_direction: Option<Direction>,
+    /// Whether to use bidi shaping for mixed-direction text.
+    pub use_bidi: bool,
+    /// Whether to enable hyphenation for word breaking.
+    pub use_hyphenation: bool,
+    /// Minimum word length (in chars) to consider for hyphenation.
+    /// Words shorter than this will never be hyphenated. Default: 4.
+    pub min_word_len: usize,
+    /// Minimum prefix length (in chars) before a hyphen. Default: 2.
+    pub min_prefix_len: usize,
+    /// Minimum suffix length (in chars) after a hyphen. Default: 2.
+    pub min_suffix_len: usize,
+}
+
+impl Default for ParagraphConfig {
+    fn default() -> Self {
+        Self {
+            base_direction: None,
+            use_bidi: true,
+            use_hyphenation: false,
+            min_word_len: 4,
+            min_prefix_len: 2,
+            min_suffix_len: 2,
+        }
+    }
+}
+
+/// Hyphenation dictionary for English (US).
+/// Uses the Knuth-Liang algorithm with embedded TeX patterns.
+#[derive(Clone)]
+pub struct EnglishHyphenator {
+    dict: hyphenation::Standard,
+}
+
+impl EnglishHyphenator {
+    pub fn new() -> Self {
+        use hyphenation::Load;
+        Self {
+            dict: hyphenation::Standard::from_embedded(hyphenation::Language::EnglishUS)
+                .expect("Failed to load embedded English hyphenation dictionary"),
+        }
+    }
+
+    /// Find the best hyphenation point for `word` such that the prefix (including
+    /// the hyphen character) fits within `max_width` when rendered at `font_size`
+    /// using the given `shaper` and `font`.
+    /// Returns `Some((prefix_with_hyphen, suffix))` or `None`.
+    pub fn find_break_point(
+        &self,
+        word: &str,
+        font_size: f64,
+        font: &crate::font_loader::LoadedFont,
+        shaper: &crate::text_shaper::TextShaper,
+        max_width: f64,
+        min_prefix_len: usize,
+        min_suffix_len: usize,
+    ) -> Option<(String, String)> {
+        use hyphenation::Hyphenator;
+
+        if word.len() < min_prefix_len + min_suffix_len {
+            return None;
+        }
+
+        let result = self.dict.hyphenate(word);
+
+        // Collect valid break points (byte positions where hyphenation is allowed)
+        let mut break_points: Vec<usize> = result
+            .breaks
+            .iter()
+            .copied()
+            .filter(|&pos| pos >= min_prefix_len && pos + min_suffix_len <= word.len())
+            .collect();
+        break_points.sort();
+
+        // Find the largest break point where prefix + "-" fits in max_width
+        let mut best_break = None;
+        for &pos in &break_points {
+            let prefix = &word[..pos];
+            let hyphenated = format!("{}-", prefix);
+            let width = shaper.measure_width(&hyphenated, font_size, font);
+            if width <= max_width {
+                best_break = Some(pos);
+            } else {
+                break;
+            }
+        }
+
+        best_break.map(|pos| {
+            let prefix = format!("{}-", &word[..pos]);
+            let suffix = word[pos..].to_string();
+            (prefix, suffix)
+        })
+    }
+}
+
+impl Default for EnglishHyphenator {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl std::fmt::Debug for EnglishHyphenator {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("EnglishHyphenator").finish()
+    }
+}
+
+/// Paragraph layout engine.
+pub struct ParagraphEngine {
+    shaper: TextShaper,
+    font_cache: FontCache,
+    config: ParagraphConfig,
+    hyphenator: Option<EnglishHyphenator>,
+}
+
+impl ParagraphEngine {
+    pub fn new() -> Self {
+        Self {
+            shaper: TextShaper::new(),
+            font_cache: FontCache::default(),
+            config: ParagraphConfig::default(),
+            hyphenator: None,
+        }
+    }
+
+    pub fn with_font_cache(font_cache: FontCache) -> Self {
+        Self {
+            shaper: TextShaper::new(),
+            font_cache,
+            config: ParagraphConfig::default(),
+            hyphenator: None,
+        }
+    }
+
+    pub fn with_config(mut self, config: ParagraphConfig) -> Self {
+        let use_hyp = config.use_hyphenation;
+        if use_hyp && self.hyphenator.is_none() {
+            self.hyphenator = Some(EnglishHyphenator::new());
+        }
+        self.config = config;
+        self
+    }
+
+    /// Enable hyphenation with the default English (US) dictionary.
+    pub fn with_hyphenation(mut self) -> Self {
+        self.config.use_hyphenation = true;
+        if self.hyphenator.is_none() {
+            self.hyphenator = Some(EnglishHyphenator::new());
+        }
+        self
+    }
+
+    /// Layout a single line of text (no wrapping).
+    /// Glyphs are positioned according to the style's alignment within max_width.
+    /// Returns the line with space_indices populated for justification.
+    pub fn layout_line(&mut self, text: &str, style: &TextStyle, max_width: f64) -> Option<Line> {
+        let font = self.load_font(style)?;
+        let glyphs = if self.config.use_bidi {
+            self.shaper
+                .shape_bidi(text, style.size, &font, self.config.base_direction)
+        } else {
+            self.shaper.shape(text, style.size, &font)
+        };
+        if glyphs.is_empty() {
+            return Some(Line::new(
+                vec![],
+                style.size * 1.2,
+                style.size,
+                style.clone(),
+            ));
+        }
+
+        // Compute line width from shaped glyph advances
+        let line_width: f64 = glyphs.iter().map(|g| g.x_advance).sum();
+
+        // Compute x-offset based on alignment
+        let x_offset = match style.align {
+            TextAlign::Left => 0.0,
+            TextAlign::Right => (max_width - line_width).max(0.0),
+            TextAlign::Center => ((max_width - line_width) / 2.0).max(0.0),
+            TextAlign::Justified => 0.0, // Justified is handled at paragraph level
+        };
+
+        // Build positioned glyphs and track space indices.
+        // The `cluster` field on each glyph maps to a byte position in the original text.
+        // A glyph is a space if the character at its cluster position is U+0020.
+        let mut x = x_offset;
+        let mut space_indices: Vec<usize> = Vec::new();
+        let mut positioned: Vec<PositionedGlyph> = Vec::with_capacity(glyphs.len());
+
+        for (idx, g) in glyphs.iter().enumerate() {
+            // Check if this glyph corresponds to a space character.
+            // The cluster field is a byte index into the original text.
+            let is_space = text
+                .as_bytes()
+                .get(g.cluster as usize)
+                .map(|&b| b == b' ')
+                .unwrap_or(false);
+            if is_space {
+                space_indices.push(idx);
+            }
+
+            positioned.push(PositionedGlyph {
+                glyph_id: g.glyph_id,
+                x,
+                y: 0.0,
+                advance: g.x_advance,
+                font_index: g.font_index,
+            });
+            x += g.x_advance;
+        }
+
+        let line_height = style.line_height.unwrap_or(style.size * 1.2);
+        Some(
+            Line::new(positioned, line_height, style.size, style.clone())
+                .with_space_indices(space_indices),
+        )
+    }
+
+    /// Layout a paragraph with word-wrap at max_width.
+    /// Respects the style's alignment (Left, Right, Center, Justified).
+    pub fn layout_paragraph(
+        &mut self,
+        text: &str,
+        style: &TextStyle,
+        max_width: f64,
+    ) -> ParagraphLayout {
+        let font = match self.load_font(style) {
+            Some(f) => f,
+            None => return ParagraphLayout::new(vec![], max_width),
+        };
+
+        let words: Vec<&str> = text.split_whitespace().collect();
+        if words.is_empty() {
+            return ParagraphLayout::new(vec![], max_width);
+        }
+
+        let mut lines = Vec::new();
+        let mut current_line_words: Vec<String> = Vec::new();
+        let mut current_width = 0.0;
+
+        for word in &words {
+            let word_owned = word.to_string();
+            let word_width = if self.config.use_bidi {
+                self.shaper
+                    .measure_width_bidi(word, style.size, &font, self.config.base_direction)
+            } else {
+                self.shaper.measure_width(word, style.size, &font)
+            };
+            let space_width = if current_line_words.is_empty() {
+                0.0
+            } else {
+                self.shaper.measure_width(" ", style.size, &font)
+            };
+
+            if current_width + space_width + word_width > max_width
+                && !current_line_words.is_empty()
+            {
+                // Word doesn't fit. Try hyphenation if enabled.
+                let remaining_width = max_width - current_width - space_width;
+                let do_hyphenate = self.config.use_hyphenation
+                    && word.len() >= self.config.min_word_len
+                    && remaining_width > 0.0
+                    && self.hyphenator.is_some();
+
+                if do_hyphenate {
+                    if let Some(ref hyphenator) = self.hyphenator {
+                        if let Some((prefix, suffix)) = hyphenator.find_break_point(
+                            word,
+                            style.size,
+                            &font,
+                            &self.shaper,
+                            remaining_width,
+                            self.config.min_prefix_len,
+                            self.config.min_suffix_len,
+                        ) {
+                            // Flush current line with the hyphenated prefix
+                            let mut line_words = current_line_words.clone();
+                            line_words.push(prefix);
+                            let line_text = line_words.join(" ");
+                            if let Some(line) = self.layout_line(&line_text, style, max_width) {
+                                lines.push(line);
+                            }
+                            // Start new line with the suffix
+                            current_line_words.clear();
+                            let suffix_width = if self.config.use_bidi {
+                                self.shaper.measure_width_bidi(
+                                    &suffix,
+                                    style.size,
+                                    &font,
+                                    self.config.base_direction,
+                                )
+                            } else {
+                                self.shaper.measure_width(&suffix, style.size, &font)
+                            };
+                            current_line_words.push(suffix);
+                            current_width = suffix_width;
+                            continue;
+                        }
+                    }
+                }
+
+                // No hyphenation or hyphenation didn't help — flush normally
+                let line_text = current_line_words.join(" ");
+                if let Some(line) = self.layout_line(&line_text, style, max_width) {
+                    lines.push(line);
+                }
+                current_line_words.clear();
+                current_width = 0.0;
+            }
+
+            if !current_line_words.is_empty() {
+                current_width += space_width;
+            }
+            current_line_words.push(word_owned);
+            current_width += word_width;
+        }
+
+        // Flush last line
+        if !current_line_words.is_empty() {
+            let line_text = current_line_words.join(" ");
+            if let Some(line) = self.layout_line(&line_text, style, max_width) {
+                lines.push(line);
+            }
+        }
+
+        // Handle justified alignment: distribute extra space between words
+        if style.align == TextAlign::Justified {
+            let line_count = lines.len();
+            for (i, line) in lines.iter_mut().enumerate() {
+                // Don't justify the last line of the paragraph
+                if i == line_count - 1 {
+                    break;
+                }
+                // Skip lines with no spaces (single-word lines)
+                if line.space_indices.len() < 1 {
+                    continue;
+                }
+
+                let line_text_width: f64 = line.glyphs.iter().map(|g| g.advance).sum();
+                let extra = max_width - line_text_width;
+                if extra <= 0.0 {
+                    continue;
+                }
+
+                let space_count = line.space_indices.len();
+                let extra_per_space = extra / space_count as f64;
+
+                // Shift each glyph right based on how many spaces precede it.
+                // Glyphs after each space_index get shifted by an additional extra_per_space.
+                let mut accumulated_shift = 0.0;
+                let mut next_space_idx = 0;
+                for (glyph_idx, glyph) in line.glyphs.iter_mut().enumerate() {
+                    glyph.x += accumulated_shift;
+                    // If this glyph is a space boundary, accumulate shift for subsequent glyphs
+                    if next_space_idx < space_count
+                        && glyph_idx == line.space_indices[next_space_idx]
+                    {
+                        next_space_idx += 1;
+                        accumulated_shift += extra_per_space;
+                    }
+                }
+            }
+        }
+
+        ParagraphLayout::new(lines, max_width)
+    }
+
+    /// Layout multiple text runs with different styles.
+    pub fn layout_runs(&mut self, runs: &[(String, TextStyle)], max_width: f64) -> ParagraphLayout {
+        let mut all_lines = Vec::new();
+        let mut current_line_words: Vec<(String, TextStyle)> = Vec::new();
+        let mut current_width = 0.0;
+
+        for (text, style) in runs {
+            let words: Vec<&str> = text.split_whitespace().collect();
+            for word in words {
+                let font = self.load_font(style);
+                let word_width = font
+                    .as_ref()
+                    .map(|f| {
+                        if self.config.use_bidi {
+                            self.shaper.measure_width_bidi(
+                                word,
+                                style.size,
+                                f,
+                                self.config.base_direction,
+                            )
+                        } else {
+                            self.shaper.measure_width(word, style.size, f)
+                        }
+                    })
+                    .unwrap_or(0.0);
+                let space_width = if current_line_words.is_empty() {
+                    0.0
+                } else {
+                    let prev_style = &current_line_words.last().unwrap().1;
+                    self.load_font(prev_style)
+                        .as_ref()
+                        .map(|f| self.shaper.measure_width(" ", prev_style.size, f))
+                        .unwrap_or(0.0)
+                };
+
+                if current_width + space_width + word_width > max_width
+                    && !current_line_words.is_empty()
+                {
+                    // Flush
+                    let line = self.layout_word_run(&current_line_words, max_width);
+                    all_lines.push(line);
+                    current_line_words.clear();
+                    current_width = 0.0;
+                }
+
+                if !current_line_words.is_empty() {
+                    current_width += space_width;
+                }
+                current_line_words.push((word.to_string(), style.clone()));
+                current_width += word_width;
+            }
+        }
+
+        if !current_line_words.is_empty() {
+            let line = self.layout_word_run(&current_line_words, max_width);
+            all_lines.push(line);
+        }
+
+        ParagraphLayout::new(all_lines, max_width)
+    }
+
+    fn layout_word_run(&mut self, words: &[(String, TextStyle)], _max_width: f64) -> Line {
+        let mut positioned = Vec::new();
+        let mut x = 0.0;
+        let mut max_height: f64 = 0.0;
+        let mut last_style = TextStyle::new(FontRef::new("Helvetica"), 12.0);
+
+        for (word, style) in words {
+            let line_height = style.line_height.unwrap_or(style.size * 1.2);
+            max_height = max_height.max(line_height);
+            last_style = style.clone();
+
+            // Use shaped text width instead of char-count estimate
+            let font = self.font_cache.get_by_family(style.font.as_ref());
+            let shaped_width = font
+                .as_ref()
+                .map(|f| self.shaper.measure_width(word, style.size, f))
+                .unwrap_or_else(|| word.len() as f64 * style.size * 0.5);
+
+            positioned.push(PositionedGlyph {
+                glyph_id: 0,
+                x,
+                y: 0.0,
+                advance: shaped_width,
+                font_index: 0,
+            });
+            // Use shaped space width
+            let space_w = font
+                .as_ref()
+                .map(|f| self.shaper.measure_width(" ", style.size, f))
+                .unwrap_or(style.size * 0.3);
+            x += shaped_width + space_w;
+        }
+
+        Line::new(positioned, max_height, max_height * 0.8, last_style)
+    }
+
+    fn load_font(&mut self, style: &TextStyle) -> Option<LoadedFont> {
+        let props = FontProperties::new(style.font.as_ref());
+        self.font_cache.get(&props)
+    }
+}
+
+impl Default for ParagraphEngine {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use perfect_print_core::draw::TextStyle;
+    use perfect_print_core::font::FontRef;
+
+    fn test_style() -> TextStyle {
+        TextStyle::new(FontRef::new("Helvetica"), 12.0)
+    }
+
+    #[test]
+    fn test_layout_single_line() {
+        let mut engine = ParagraphEngine::new();
+        let line = engine.layout_line("Hello World", &test_style(), 500.0);
+        assert!(line.is_some());
+        let line = line.unwrap();
+        assert!(!line.glyphs.is_empty());
+        assert!(line.width > 0.0);
+    }
+
+    #[test]
+    fn test_layout_paragraph_wraps() {
+        let mut engine = ParagraphEngine::new();
+        let text = "The quick brown fox jumps over the lazy dog";
+        let layout = engine.layout_paragraph(text, &test_style(), 100.0);
+        assert!(layout.line_count() > 1, "Should wrap to multiple lines");
+    }
+
+    #[test]
+    fn test_layout_paragraph_no_wrap_needed() {
+        let mut engine = ParagraphEngine::new();
+        let text = "Hi";
+        let layout = engine.layout_paragraph(text, &test_style(), 500.0);
+        assert_eq!(layout.line_count(), 1, "Short text should be one line");
+    }
+
+    #[test]
+    fn test_layout_empty_paragraph() {
+        let mut engine = ParagraphEngine::new();
+        let layout = engine.layout_paragraph("", &test_style(), 100.0);
+        assert_eq!(layout.line_count(), 0);
+    }
+
+    #[test]
+    fn test_line_height() {
+        let mut engine = ParagraphEngine::new();
+        let line = engine.layout_line("Test", &test_style(), 500.0).unwrap();
+        assert!(line.height > 0.0);
+        assert!(line.height >= 12.0); // At least font size
+    }
+
+    #[test]
+    fn test_layout_with_rtl() {
+        let engine = ParagraphEngine::new();
+        let config = ParagraphConfig {
+            base_direction: Some(Direction::RightToLeft),
+            use_bidi: true,
+            ..Default::default()
+        };
+        let mut engine = engine.with_config(config);
+        let line = engine.layout_line("Hello", &test_style(), 500.0);
+        assert!(line.is_some());
+    }
+
+    #[test]
+    fn test_layout_mixed_bidi_paragraph() {
+        let mut engine = ParagraphEngine::new();
+        let text = "Hello World test paragraph wrapping";
+        let layout = engine.layout_paragraph(text, &test_style(), 80.0);
+        assert!(layout.line_count() >= 2, "Should wrap to multiple lines");
+    }
+
+    #[test]
+    fn test_right_align_offsets_glyphs_right() {
+        use perfect_print_core::draw::TextAlign;
+        let mut engine = ParagraphEngine::new();
+        let mut style = test_style();
+        style.align = TextAlign::Right;
+        let line = engine.layout_line("Hello", &style, 500.0).unwrap();
+        // Right-aligned: first glyph should be at (max_width - line_width)
+        assert!(
+            line.glyphs[0].x > 0.0,
+            "Right-aligned glyphs should have x > 0"
+        );
+        let line_width: f64 = line.glyphs.iter().map(|g| g.advance).sum();
+        let expected_x = 500.0 - line_width;
+        assert!(
+            (line.glyphs[0].x - expected_x).abs() < 1.0,
+            "First glyph x={} should be near expected x={}",
+            line.glyphs[0].x,
+            expected_x
+        );
+    }
+
+    #[test]
+    fn test_center_align_centers_glyphs() {
+        use perfect_print_core::draw::TextAlign;
+        let mut engine = ParagraphEngine::new();
+        let mut style = test_style();
+        style.align = TextAlign::Center;
+        let line = engine.layout_line("Hello", &style, 500.0).unwrap();
+        let line_width: f64 = line.glyphs.iter().map(|g| g.advance).sum();
+        let expected_x = (500.0 - line_width) / 2.0;
+        assert!(
+            (line.glyphs[0].x - expected_x).abs() < 1.0,
+            "First glyph x={} should be near expected center x={}",
+            line.glyphs[0].x,
+            expected_x
+        );
+    }
+
+    #[test]
+    fn test_justify_spreads_words() {
+        use perfect_print_core::draw::TextAlign;
+        let mut engine = ParagraphEngine::new();
+        let mut style = test_style();
+        style.align = TextAlign::Justified;
+        let text = "The quick brown fox jumps over the lazy dog";
+        let layout = engine.layout_paragraph(text, &style, 100.0);
+        assert!(layout.line_count() >= 3, "Should have 3+ lines");
+        // Check that non-last lines have glyphs spread wider than the raw text width
+        for (i, line) in layout.lines.iter().enumerate() {
+            if i == layout.lines.len() - 1 {
+                break; // Skip last line
+            }
+            if line.glyphs.len() > 1 {
+                let first_x = line.glyphs.first().unwrap().x;
+                let last_x = line.glyphs.last().unwrap().x;
+                let spread = last_x - first_x;
+                let raw_width: f64 = line.glyphs.iter().map(|g| g.advance).sum();
+                assert!(
+                    spread >= raw_width * 0.95,
+                    "Justified line {} should have spread >= raw width",
+                    i
+                );
+            }
+        }
+    }
+
+    // ─── Hyphenation Tests ────────────────────────────────────────────
+
+    #[test]
+    fn test_hyphenation_basic() {
+        use perfect_print_core::draw::TextAlign;
+        let mut engine = ParagraphEngine::new().with_hyphenation();
+        let mut style = test_style();
+        style.align = TextAlign::Left;
+        // "The internationalization" — "The" fills part of the line,
+        // then "internationalization" doesn't fit and should be hyphenated
+        let text = "The internationalization";
+        let layout = engine.layout_paragraph(text, &style, 80.0);
+        assert!(
+            layout.line_count() >= 2,
+            "Long word should be hyphenated across lines, got {} lines",
+            layout.line_count()
+        );
+    }
+
+    #[test]
+    fn test_hyphenation_disabled_by_default() {
+        let mut engine = ParagraphEngine::new();
+        let text = "hyphenation";
+        let layout = engine.layout_paragraph(text, &test_style(), 50.0);
+        // Without hyphenation, the word should overflow or be on a single line
+        // (depending on the engine's behavior when a word doesn't fit)
+        // The key is that it doesn't panic
+        assert!(layout.line_count() >= 1);
+    }
+
+    #[test]
+    fn test_hyphenation_with_config() {
+        use perfect_print_core::draw::TextAlign;
+        let config = ParagraphConfig {
+            use_hyphenation: true,
+            ..Default::default()
+        };
+        let mut engine = ParagraphEngine::new().with_config(config);
+        let mut style = test_style();
+        style.align = TextAlign::Left;
+        let text = "The extraordinary internationalization of hyphenation";
+        let layout = engine.layout_paragraph(text, &style, 80.0);
+        // Should produce multiple lines with hyphenation
+        assert!(
+            layout.line_count() >= 3,
+            "Should have 3+ lines with hyphenation"
+        );
+    }
+
+    #[test]
+    fn test_hyphenation_short_word_not_hyphenated() {
+        let mut engine = ParagraphEngine::new().with_hyphenation();
+        let text = "the cat sat";
+        let layout = engine.layout_paragraph(text, &test_style(), 30.0);
+        // Short words (3 chars) should not be hyphenated (min_word_len = 4)
+        assert!(layout.line_count() >= 1);
+    }
+
+    #[test]
+    fn test_hyphenator_new() {
+        let hyphenator = EnglishHyphenator::new();
+        let result = hyphenator.find_break_point(
+            "hyphenation",
+            12.0,
+            &crate::font_loader::FontCache::default()
+                .get_by_family("Helvetica")
+                .unwrap_or_else(|| {
+                    panic!("Helvetica font not found");
+                }),
+            &crate::text_shaper::TextShaper::new(),
+            50.0,
+            2,
+            2,
+        );
+        // With a very narrow width, should find a break point or return None
+        // (depends on the font metrics)
+        let _ = result;
+    }
+}

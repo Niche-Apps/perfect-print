@@ -1,0 +1,13 @@
+[package]
+name = "pp-proto-coretext"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "proto-coretext"
+path = "src/main.rs"
+
+[dependencies]
+core-graphics = "0.24"
+core-foundation = "0.10"
+core-text = "21"

@@ -1,0 +1,20 @@
+[package]
+name = "perfect-print-tauri"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "Tauri integration for perfect-print"
+
+[features]
+default = ["tauri"]
+tauri = ["dep:tauri"]
+
+[dependencies]
+perfect-print-core = { path = "../perfect-print-core" }
+perfect-print-pdf = { path = "../perfect-print-pdf" }
+perfect-print-dialog = { path = "../perfect-print-dialog" }
+log = { workspace = true }
+tauri = { version = "2", optional = true }

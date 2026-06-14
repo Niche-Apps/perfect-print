@@ -1,0 +1,12 @@
+[package]
+name = "pp-proto-pdf"
+version = "0.1.0"
+edition = "2021"
+
+# Prototype: test printpdf + font-kit for PDF output with text
+[[bin]]
+name = "proto-pdf"
+path = "src/main.rs"
+
+[dependencies]
+printpdf = "0.7"

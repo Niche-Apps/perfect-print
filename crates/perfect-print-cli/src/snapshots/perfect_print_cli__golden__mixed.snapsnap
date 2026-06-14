@@ -1,0 +1,7 @@
+---
+source: crates/perfect-print-cli/src/golden.rs
+assertion_line: 141
+expression: png_bytes
+extension: png
+snapshot_kind: binary
+---

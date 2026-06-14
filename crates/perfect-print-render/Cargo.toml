@@ -1,0 +1,17 @@
+[package]
+name = "perfect-print-render"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "Renderer traits and raster/vector adapters"
+
+[dependencies]
+perfect-print-core = { path = "../perfect-print-core" }
+tiny-skia = { workspace = true }
+ttf-parser = { workspace = true }
+fontdb = { workspace = true }
+thiserror = { workspace = true }
+log = { workspace = true }

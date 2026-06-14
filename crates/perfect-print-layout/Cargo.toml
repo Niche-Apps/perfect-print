@@ -1,0 +1,18 @@
+[package]
+name = "perfect-print-layout"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "Text layout, flow layout, pagination, tables, headers, footers"
+
+[dependencies]
+perfect-print-core = { path = "../perfect-print-core" }
+rustybuzz = { workspace = true }
+ttf-parser = { workspace = true }
+fontdb = { workspace = true }
+unicode-bidi = { workspace = true }
+log = { workspace = true }
+hyphenation = { version = "0.8", features = ["embed_en-us"] }

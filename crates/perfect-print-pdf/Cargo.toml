@@ -1,0 +1,21 @@
+[package]
+name = "perfect-print-pdf"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "PDF output from the canonical page model"
+
+[dependencies]
+perfect-print-core = { path = "../perfect-print-core" }
+perfect-print-layout = { path = "../perfect-print-layout" }
+perfect-print-render = { path = "../perfect-print-render" }
+lopdf = { workspace = true }
+thiserror = { workspace = true }
+log = { workspace = true }
+image = { workspace = true }
+flate2 = "1"
+ttf-parser = { workspace = true }
+fontdb = { workspace = true }

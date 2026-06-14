@@ -1,0 +1,52 @@
+[package]
+name = "perfect-print-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+serde_json = { workspace = true }
+
+[dependencies.perfect-print-core]
+path = "../crates/perfect-print-core"
+
+[dependencies.perfect-print-layout]
+path = "../crates/perfect-print-layout"
+
+[dependencies.perfect-print-pdf]
+path = "../crates/perfect-print-pdf"
+
+[dependencies.perfect-print-barcode]
+path = "../crates/perfect-print-barcode"
+
+[[bin]]
+name = "fuzz_document_model_json"
+path = "fuzz_targets/fuzz_document_model_json.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_pdf_render"
+path = "fuzz_targets/fuzz_pdf_render.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_text_layout"
+path = "fuzz_targets/fuzz_text_layout.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_barcode"
+path = "fuzz_targets/fuzz_barcode.rs"
+test = false
+doc = false
+bench = false

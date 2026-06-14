@@ -1,0 +1,18 @@
+[package]
+name = "perfect-print-backend-windows"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "Windows native print backend"
+
+[dependencies]
+perfect-print-core = { path = "../perfect-print-core" }
+perfect-print-pdf = { path = "../perfect-print-pdf" }
+perfect-print-dialog = { path = "../perfect-print-dialog" }
+log = { workspace = true }
+
+[target.'cfg(target_os = "windows")'.dependencies]
+windows = { workspace = true }
