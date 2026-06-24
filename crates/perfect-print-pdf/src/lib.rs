@@ -40,7 +40,7 @@ impl PdfRenderer {
     pub fn render_to_pdf(&self, document: &DocumentModel, output_path: &Path) -> PdfResult<()> {
         use lopdf::{Document as PdfDocument, Object};
 
-        let mut pdf = PdfDocument::with_version("1.5");
+        let mut pdf = PdfDocument::with_version("1.4");
 
         // Set up font loader for embedding
         let font_loader = perfect_print_layout::font_loader::SystemFontLoader::new();
@@ -78,17 +78,26 @@ impl PdfRenderer {
             }
         }
 
+        // Reserve the page tree object before pages so every Page can point back
+        // at its Parent. Some PDF consumers are forgiving without this; PDFKit
+        // and printer preview paths are not.
+        let pages_id = pdf.new_object_id();
+
         // Build pages
         let mut page_ids = Vec::new();
 
         for (_page_idx, page) in document.pages.iter().enumerate() {
-            let page_id =
-                self.build_page(&mut pdf, page, &embedded_fonts, &document.image_store)?;
+            let page_id = self.build_page(
+                &mut pdf,
+                page,
+                pages_id,
+                &embedded_fonts,
+                &document.image_store,
+            )?;
             page_ids.push(page_id);
         }
 
         // Build page tree
-        let pages_id = pdf.new_object_id();
         let mut pages_dict = lopdf::Dictionary::new();
         pages_dict.set("Type", "Pages");
         pages_dict.set("Count", page_ids.len() as i64);
@@ -103,13 +112,20 @@ impl PdfRenderer {
         catalog_dict.set("Pages", Object::Reference(pages_id));
         pdf.set_object(catalog_id, Object::Dictionary(catalog_dict));
 
+        pdf.trailer.set("Root", Object::Reference(catalog_id));
+
         // Set document info
+        let mut info_id = None;
         if let Some(ref title) = document.metadata.title {
-            let info_id = pdf.new_object_id();
+            let id = pdf.new_object_id();
             let mut info_dict = lopdf::Dictionary::new();
             info_dict.set("Title", title.as_str());
             info_dict.set("Creator", "perfect-print 0.1.0");
-            pdf.set_object(info_id, Object::Dictionary(info_dict));
+            pdf.set_object(id, Object::Dictionary(info_dict));
+            info_id = Some(id);
+        }
+        if let Some(id) = info_id {
+            pdf.trailer.set("Info", Object::Reference(id));
         }
 
         pdf.save(output_path)
@@ -122,6 +138,7 @@ impl PdfRenderer {
         &self,
         pdf: &mut lopdf::Document,
         page: &perfect_print_core::page::Page,
+        parent_id: lopdf::ObjectId,
         embedded_fonts: &[(String, lopdf::ObjectId)],
         image_store: &perfect_print_core::resource::ImageStore,
     ) -> PdfResult<lopdf::ObjectId> {
@@ -178,6 +195,7 @@ impl PdfRenderer {
         let page_id = pdf.new_object_id();
         let mut page_dict = Dictionary::new();
         page_dict.set("Type", "Page");
+        page_dict.set("Parent", Object::Reference(parent_id));
         page_dict.set(
             "MediaBox",
             vec![
@@ -694,6 +712,49 @@ mod tests {
         assert!(path.exists());
         let metadata = std::fs::metadata(&path).unwrap();
         assert!(metadata.len() > 500);
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn rendered_pdf_is_loadable_by_pdf_consumers() {
+        let mut image_store = perfect_print_core::resource::ImageStore::new();
+        let img_data = perfect_print_core::image::ImageData::test_pattern(20, 20);
+        image_store.insert("test", img_data);
+
+        let mut page = perfect_print_core::page::Page::new(PageSize::Letter);
+        page.add(DrawCommand::Image {
+            image_id: "test".to_string(),
+            dest_rect: Rect::new(
+                0.0,
+                0.0,
+                PageSize::Letter.width(),
+                PageSize::Letter.height(),
+            ),
+            source_rect: None,
+        });
+
+        let mut model = DocumentBuilder::new()
+            .title("Loadable PDF")
+            .add_page(page)
+            .build()
+            .unwrap();
+        model.image_store = image_store;
+
+        let renderer = PdfRenderer::new();
+        let path = std::env::temp_dir().join("test_loadable_pdf.pdf");
+        renderer.render_to_pdf(&model, &path).unwrap();
+
+        let loaded = lopdf::Document::load(&path).expect("rendered PDF should load");
+        assert!(
+            loaded.trailer.get(b"Root").is_ok(),
+            "PDF trailer should contain Root for PDFKit/Preview"
+        );
+        assert_eq!(loaded.get_pages().len(), 1);
+
+        let pdf_bytes = std::fs::read(&path).unwrap();
+        assert!(pdf_bytes.starts_with(b"%PDF-1.4"));
+        assert!(String::from_utf8_lossy(&pdf_bytes).contains("/Parent"));
 
         let _ = std::fs::remove_file(&path);
     }
