@@ -16,6 +16,7 @@ perfect-print-pdf = { path = "../perfect-print-pdf" }
 perfect-print-dialog = { path = "../perfect-print-dialog" }
 log = { workspace = true }
 serde_json = { workspace = true }
+tempfile = "3"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 perfect-print-backend-macos = { path = "../perfect-print-backend-macos" }

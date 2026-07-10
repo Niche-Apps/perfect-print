@@ -28,7 +28,7 @@ pub enum ImageLoadError {
 /// `(width, height, rgba_pixels)` where rgba_pixels is a flat Vec of RGBA bytes.
 pub fn load_image(path: &std::path::Path) -> Result<(u32, u32, Vec<u8>), ImageLoadError> {
     let img = image::ImageReader::open(path)
-        .map_err(|e| ImageLoadError::Io(e))?
+        .map_err(ImageLoadError::Io)?
         .decode()
         .map_err(|e| ImageLoadError::Decode(e.to_string()))?;
 

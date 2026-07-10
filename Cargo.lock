@@ -4802,6 +4802,7 @@ dependencies = [
  "perfect-print-pdf",
  "perfect-print-render",
  "serde_json",
+ "tempfile",
 ]
 
 [[package]]
@@ -4819,6 +4820,7 @@ dependencies = [
 name = "perfect-print-backend-macos"
 version = "0.1.0"
 dependencies = [
+ "cc",
  "log",
  "perfect-print-core",
  "perfect-print-dialog",
@@ -4992,10 +4994,13 @@ name = "perfect-print-tauri"
 version = "0.1.0"
 dependencies = [
  "log",
+ "perfect-print",
+ "perfect-print-backend-macos",
  "perfect-print-core",
  "perfect-print-dialog",
  "perfect-print-pdf",
  "tauri",
+ "tauri-plugin",
 ]
 
 [[package]]
@@ -6712,6 +6717,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "tauri-plugin"
+version = "2.6.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "74be5dd4bed9afbd145e5716b5fa2ec28cbc29c34ffa61c258c9273d896c8020"
+dependencies = [
+ "anyhow",
+ "glob",
+ "plist",
+ "schemars 0.8.22",
+ "serde",
+ "serde_json",
+ "tauri-utils",
+ "walkdir",
+]
+
+[[package]]
 name = "tauri-runtime"
 version = "2.11.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6764,9 +6785,9 @@ dependencies = [
 
 [[package]]
 name = "tauri-utils"
-version = "2.9.2"
+version = "2.9.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "092379df9a707631978e6c56b1bc2401d387f01e2d4a3c123360d167bbb9aa95"
+checksum = "3e176a18e67764923c4f1ce66f25ae4abe5f688384d5eb1a0fa6c77f3d90f887"
 dependencies = [
  "anyhow",
  "brotli",
@@ -6818,7 +6839,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32497e9a4c7b38532efcdebeef879707aa9f794296a4f0244f6f69e9bc8574bd"
 dependencies = [
  "fastrand",
- "getrandom 0.3.4",
+ "getrandom 0.4.2",
  "once_cell",
  "rustix 1.1.4",
  "windows-sys 0.61.2",

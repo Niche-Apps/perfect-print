@@ -13,19 +13,21 @@ perfect-print has a layered backend architecture. The **core** and **layout** cr
 | `perfect-print-render` | All | Stable | `Render` trait + `TinySkiaRenderer` (raster) |
 | `perfect-print-pdf` | All | Stable | PDF 1.5 output via lopdf |
 | `perfect-print-dialog` | All | Stable | `PrintDialog` trait, `PrintSettings`, validation |
-| `perfect-print-backend-macos` | macOS | Active | `lpstat`/`lp`/`cancel` CLI bridge |
+| `perfect-print-backend-macos` | macOS | Active | Native `NSPrintPanel` plus `lpstat`/`lp`/`cancel` job API |
 | `perfect-print-backend-windows` | Windows | Stub | Planned: `winspool` or `PrintDocument` API |
 | `perfect-print-backend-linux` | Linux | Stub | Planned: CUPS via `cups-sys` or `ipp` crate |
 | `perfect-print` | All | Stable | Ergonomic public API (`Document`, `Paragraph`, etc.) |
 | `perfect-print-cli` | All | Stable | CLI: model, render, verify, print, diagnostics |
 | `perfect-print-preview` | All | Stub | Planned: live preview pane |
-| `perfect-print-tauri` | All | Stub | Planned: Tauri app integration |
+| `perfect-print-tauri` | All | Active | Tauri wrapper over canonical Perfect Print rendering and native submission |
 | `perfect-print-egui` | All | Stub | Planned: egui native print dialog |
 | `perfect-print-iced` | All | Stub | Planned: iced native print dialog |
 
 ## macOS Backend (`perfect-print-backend-macos`)
 
 ### Capabilities
+- **Native interactive printing**: `NSPrintPanel` + `NSPrintOperation` + PDFKit
+- **In-memory PDF submission**: no shared temporary filename or page rasterization
 - **Printer enumeration**: `lpstat -a` — lists all available printers
 - **Default printer**: `lpstat -d` — system default destination
 - **Printer capabilities**: `lpoptions -p <name> -l` — paper sizes, color, duplex
@@ -52,10 +54,9 @@ perfect-print has a layered backend architecture. The **core** and **layout** cr
 4. `cancel_job(job_id)` → cancel a queued job
 
 ### Limitations
-- No native `NSPrintPanel` integration (uses CLI bridge)
-- No per-page preview in print dialog
 - Resolution options not exposed via `lpoptions` parsing
 - Borderless printing not detected
+- Printer-specific color controls remain owned by `NSPrintPanel`
 
 ## Windows Backend (`perfect-print-backend-windows`)
 

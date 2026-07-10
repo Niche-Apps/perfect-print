@@ -13,8 +13,15 @@ default = ["tauri"]
 tauri = ["dep:tauri"]
 
 [dependencies]
+perfect-print = { path = "../perfect-print" }
 perfect-print-core = { path = "../perfect-print-core" }
 perfect-print-pdf = { path = "../perfect-print-pdf" }
 perfect-print-dialog = { path = "../perfect-print-dialog" }
 log = { workspace = true }
 tauri = { version = "2", optional = true }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+perfect-print-backend-macos = { path = "../perfect-print-backend-macos" }
+
+[build-dependencies]
+tauri-plugin = { version = "2", features = ["build"] }

@@ -314,12 +314,7 @@ impl Default for Document {
 /// Print a document using the platform's native print backend.
 #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
 pub fn print_document(model: &DocumentModel) -> Result<Option<String>, PrintError> {
-    let temp_dir = std::env::temp_dir();
-    let pdf_path = temp_dir.join("perfect-print-temp.pdf");
-    PdfRenderer::new()
-        .render_to_pdf(model, &pdf_path)
-        .map_err(|e| PrintError::PrintFailed(format!("PDF render failed: {}", e)))?;
-    platform_print(&pdf_path, &PrintSettings::default())
+    print_document_with(model, &PrintSettings::default())
 }
 
 /// Print a document with custom settings.
@@ -328,25 +323,48 @@ pub fn print_document_with(
     model: &DocumentModel,
     settings: &PrintSettings,
 ) -> Result<Option<String>, PrintError> {
-    let temp_dir = std::env::temp_dir();
-    let pdf_path = temp_dir.join("perfect-print-temp.pdf");
-    PdfRenderer::new()
-        .render_to_pdf(model, &pdf_path)
+    let pdf_bytes = PdfRenderer::new()
+        .render_to_bytes(model)
         .map_err(|e| PrintError::PrintFailed(format!("PDF render failed: {}", e)))?;
-    platform_print(&pdf_path, settings)
+    platform_print_bytes(
+        &pdf_bytes,
+        model.metadata.title.as_deref().unwrap_or("Perfect Print"),
+        settings,
+    )
 }
 
 #[cfg(target_os = "macos")]
-fn platform_print(
-    pdf_path: &std::path::Path,
+fn platform_print_bytes(
+    pdf_bytes: &[u8],
+    title: &str,
     settings: &PrintSettings,
 ) -> Result<Option<String>, PrintError> {
-    let dialog = perfect_print_backend_macos::MacosPrintDialog::new();
-    dialog.submit_print_job(pdf_path, settings)
+    perfect_print_backend_macos::print_pdf_bytes_with_dialog(pdf_bytes, Some(title), settings)
+        .map(|submitted| submitted.then(|| "native-print-dialog".to_string()))
+}
+
+#[cfg(any(target_os = "linux", target_os = "windows"))]
+fn platform_print_bytes(
+    pdf_bytes: &[u8],
+    _title: &str,
+    settings: &PrintSettings,
+) -> Result<Option<String>, PrintError> {
+    use std::io::Write;
+
+    let mut pdf_file = tempfile::Builder::new()
+        .prefix("perfect-print-")
+        .suffix(".pdf")
+        .tempfile()
+        .map_err(|e| PrintError::PrintFailed(format!("Temporary PDF create failed: {}", e)))?;
+    pdf_file
+        .write_all(pdf_bytes)
+        .and_then(|_| pdf_file.flush())
+        .map_err(|e| PrintError::PrintFailed(format!("Temporary PDF write failed: {}", e)))?;
+    platform_print_file(pdf_file.path(), settings)
 }
 
 #[cfg(target_os = "linux")]
-fn platform_print(
+fn platform_print_file(
     pdf_path: &std::path::Path,
     settings: &PrintSettings,
 ) -> Result<Option<String>, PrintError> {
@@ -355,7 +373,7 @@ fn platform_print(
 }
 
 #[cfg(target_os = "windows")]
-fn platform_print(
+fn platform_print_file(
     pdf_path: &std::path::Path,
     settings: &PrintSettings,
 ) -> Result<Option<String>, PrintError> {

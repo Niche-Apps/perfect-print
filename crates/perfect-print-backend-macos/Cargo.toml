@@ -15,5 +15,6 @@ perfect-print-dialog = { path = "../perfect-print-dialog" }
 log = { workspace = true }
 
 [target.'cfg(target_os = "macos")'.dependencies]
-# Placeholder for future native NSPrintPanel integration via objc2.
-# Currently using lpstat/lp/lpoptions CLI bridge which works reliably.
+
+[build-dependencies]
+cc = "1"

@@ -5,8 +5,9 @@
 A Rust developer can create a document in under 20 lines, export it to PDF,
 render PNG previews, and submit print jobs through the available backend. The
 project uses one canonical page model so output paths can be measured and tested
-against each other. Native GUI print dialogs are still backend-specific work in
-progress.
+against each other. On macOS, canonical documents and existing PDF bytes open a
+real `NSPrintPanel` backed by `NSPrintOperation`; the CLI job API remains available
+for unattended submission and queue management.
 
 ## Quick Start
 

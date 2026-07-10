@@ -232,9 +232,10 @@ cargo run -p perfect-print-cli -- diagnostics hello --out hello-diag.zip
 ## Platform Notes
 
 ### macOS
-- Full support via `lpstat`/`lp`/`cancel` CLI bridge
-- Job tracking and cancellation supported
-- No native print dialog (uses CLI)
+- Interactive printing uses `NSPrintPanel`, `NSPrintOperation`, and PDFKit
+- Canonical models render once to in-memory PDF bytes before the panel opens
+- Unattended submission, job tracking, and cancellation remain available through
+  the `lpstat`/`lp`/`cancel` bridge
 
 ### Windows
 - Backend is a stub — PDF/raster output works

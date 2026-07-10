@@ -10,10 +10,139 @@
 
 use perfect_print_core::page::PageSize;
 use perfect_print_dialog::{
-    DuplexMode, PageOrientation, PageRange, PrintDialog, PrintDialogResult, PrintError,
+    ColorMode, DuplexMode, PageOrientation, PageRange, PrintDialog, PrintDialogResult, PrintError,
     PrintScaling, PrintSettings, Printer, PrinterCapabilities, PrinterState,
 };
+use std::ffi::CString;
 use std::process::Command;
+
+#[cfg(target_os = "macos")]
+#[repr(C)]
+struct NativePrintSettings {
+    copies: u32,
+    landscape: bool,
+    duplex: u8,
+    color_mode: u8,
+    scaling: u8,
+    custom_scale: f64,
+    paper_width: f64,
+    paper_height: f64,
+    collate: bool,
+    page_range_kind: u8,
+    first_page: u32,
+    last_page: u32,
+}
+
+#[cfg(target_os = "macos")]
+unsafe extern "C" {
+    fn perfect_print_pdf_dialog(
+        pdf_bytes: *const u8,
+        pdf_length: usize,
+        title_utf8: *const std::ffi::c_char,
+        settings: NativePrintSettings,
+        selected_pages: *const u32,
+        selected_page_count: usize,
+    ) -> i32;
+}
+
+/// Show the native macOS print panel for an in-memory PDF.
+///
+/// Returns `Ok(true)` when the user submits the job and `Ok(false)` when the
+/// panel is cancelled. The native bridge always runs the panel on AppKit's main
+/// thread, even when called by an async/Tauri worker thread.
+#[cfg(target_os = "macos")]
+pub fn print_pdf_bytes_with_dialog(
+    pdf_bytes: &[u8],
+    title: Option<&str>,
+    settings: &PrintSettings,
+) -> PrintDialogResult<bool> {
+    if pdf_bytes.len() < 5 || !pdf_bytes.starts_with(b"%PDF-") {
+        return Err(PrintError::PrintFailed(
+            "Document is not a valid PDF payload".to_string(),
+        ));
+    }
+
+    let page_size = settings.paper_size.to_size();
+    let (scaling, custom_scale) = match settings.scaling {
+        PrintScaling::FitToPage => (0, 1.0),
+        PrintScaling::FillPage => (1, 1.0),
+        PrintScaling::None => (2, 1.0),
+        PrintScaling::Custom(scale) => (3, scale),
+    };
+    let native_settings = NativePrintSettings {
+        copies: settings.copies.max(1),
+        landscape: matches!(
+            settings.orientation,
+            PageOrientation::Landscape | PageOrientation::ReverseLandscape
+        ),
+        duplex: match settings.duplex {
+            DuplexMode::Simplex => 0,
+            DuplexMode::LongEdge => 1,
+            DuplexMode::ShortEdge => 2,
+        },
+        color_mode: match settings.color_mode {
+            ColorMode::Color => 0,
+            ColorMode::Monochrome => 1,
+            ColorMode::Grayscale => 2,
+        },
+        scaling,
+        custom_scale,
+        paper_width: page_size.width,
+        paper_height: page_size.height,
+        collate: settings.collate,
+        page_range_kind: match settings.page_range {
+            PageRange::All => 0,
+            PageRange::Range(_, _) => 1,
+            PageRange::Pages(_) => 2,
+        },
+        first_page: match settings.page_range {
+            PageRange::Range(first, _) => first,
+            _ => 0,
+        },
+        last_page: match settings.page_range {
+            PageRange::Range(_, last) => last,
+            _ => 0,
+        },
+    };
+
+    let selected_pages = match &settings.page_range {
+        PageRange::Pages(pages) => pages.as_slice(),
+        _ => &[],
+    };
+
+    let safe_title = title.unwrap_or("Perfect Print").replace('\0', " ");
+    let title = CString::new(safe_title)
+        .map_err(|_| PrintError::Platform("Print title contains invalid data".to_string()))?;
+    let result = unsafe {
+        perfect_print_pdf_dialog(
+            pdf_bytes.as_ptr(),
+            pdf_bytes.len(),
+            title.as_ptr(),
+            native_settings,
+            selected_pages.as_ptr(),
+            selected_pages.len(),
+        )
+    };
+
+    match result {
+        1 => Ok(true),
+        0 => Ok(false),
+        _ => Err(PrintError::PrintFailed(
+            "macOS could not create the native PDF print operation".to_string(),
+        )),
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn print_pdf_bytes_with_dialog(
+    _pdf_bytes: &[u8],
+    _title: Option<&str>,
+    _settings: &PrintSettings,
+) -> PrintDialogResult<bool> {
+    Err(PrintError::Platform(
+        "The macOS print panel is unavailable on this platform".to_string(),
+    ))
+}
 
 /// macOS native print backend.
 pub struct MacosPrintDialog;
@@ -44,7 +173,7 @@ impl MacosPrintDialog {
                 continue;
             }
 
-            let is_default = default_printer.as_ref().map_or(false, |d| d == name);
+            let is_default = default_printer.as_ref().is_some_and(|d| d == name);
             let caps = self.get_printer_caps(name);
 
             printers.push(Printer::new(PrinterCapabilities {
@@ -56,11 +185,7 @@ impl MacosPrintDialog {
                 supported_resolutions: caps.supported_resolutions,
                 supports_borderless: false,
                 is_default,
-                state: if is_default {
-                    PrinterState::Ready
-                } else {
-                    PrinterState::Ready
-                },
+                state: PrinterState::Ready,
             }));
 
             if is_default && printers.len() == 1 {
@@ -122,7 +247,7 @@ impl MacosPrintDialog {
                             if lower.contains(&size.0.to_lowercase())
                                 && !paper_sizes.contains(&size.1)
                             {
-                                paper_sizes.push(size.1.clone());
+                                paper_sizes.push(size.1);
                             }
                         }
                     }
@@ -135,8 +260,6 @@ impl MacosPrintDialog {
             let stdout = String::from_utf8_lossy(&output.stdout);
             if stdout.contains("disabled") {
                 PrinterState::Error("Printer disabled".to_string())
-            } else if stdout.contains("idle") || stdout.contains("ready") {
-                PrinterState::Ready
             } else {
                 PrinterState::Ready
             }
@@ -157,17 +280,12 @@ impl MacosPrintDialog {
         }
     }
 
-    /// Show the native print dialog.
+    /// Return validated settings for the settings-only trait hook.
     ///
-    /// On macOS, we use the `osascript` bridge to show NSPrintPanel.
-    /// This requires a small AppleScript that creates a print operation.
+    /// A real `NSPrintPanel` requires document content. Interactive callers use
+    /// `print_pdf_bytes_with_dialog`, which supplies the PDF and displays the
+    /// panel through `NSPrintOperation`.
     fn show_native_dialog(&self, settings: &PrintSettings) -> PrintDialogResult<PrintSettings> {
-        // For now, return current settings.
-        // Full NSPrintPanel integration requires either:
-        // 1. objc2 AppKit bindings (complex type system issues)
-        // 2. A small native helper binary
-        // 3. NSAppleScript bridge
-        log::warn!("Native print dialog not yet integrated. Use `lp` command for printing.");
         Ok(settings.clone())
     }
 
@@ -385,6 +503,13 @@ impl Default for MacosPrintDialog {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn print_dialog_rejects_invalid_pdf_before_native_panel() {
+        let result =
+            print_pdf_bytes_with_dialog(b"not a pdf", Some("Invalid"), &PrintSettings::default());
+        assert!(matches!(result, Err(PrintError::PrintFailed(_))));
+    }
 
     #[test]
     fn test_enumerate_printers() {

@@ -31,6 +31,12 @@ pub type PdfResult<T> = Result<T, PdfError>;
 /// PDF renderer that converts the canonical page model to PDF bytes.
 pub struct PdfRenderer;
 
+impl Default for PdfRenderer {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl PdfRenderer {
     pub fn new() -> Self {
         Self
@@ -38,6 +44,25 @@ impl PdfRenderer {
 
     /// Render the document to a PDF file.
     pub fn render_to_pdf(&self, document: &DocumentModel, output_path: &Path) -> PdfResult<()> {
+        let mut pdf = self.build_pdf(document)?;
+        pdf.save(output_path)
+            .map_err(|e| PdfError::Generation(format!("PDF save failed: {}", e)))?;
+        Ok(())
+    }
+
+    /// Render the document directly to PDF bytes.
+    ///
+    /// This avoids shared temporary files and is the preferred API for native
+    /// print dialogs, webview bridges, uploads, and concurrent render jobs.
+    pub fn render_to_bytes(&self, document: &DocumentModel) -> PdfResult<Vec<u8>> {
+        let mut pdf = self.build_pdf(document)?;
+        let mut bytes = Vec::new();
+        pdf.save_to(&mut bytes)
+            .map_err(|e| PdfError::Generation(format!("PDF serialization failed: {}", e)))?;
+        Ok(bytes)
+    }
+
+    fn build_pdf(&self, document: &DocumentModel) -> PdfResult<lopdf::Document> {
         use lopdf::{Document as PdfDocument, Object};
 
         let mut pdf = PdfDocument::with_version("1.4");
@@ -86,7 +111,7 @@ impl PdfRenderer {
         // Build pages
         let mut page_ids = Vec::new();
 
-        for (_page_idx, page) in document.pages.iter().enumerate() {
+        for page in &document.pages {
             let page_id = self.build_page(
                 &mut pdf,
                 page,
@@ -128,10 +153,7 @@ impl PdfRenderer {
             pdf.trailer.set("Info", Object::Reference(id));
         }
 
-        pdf.save(output_path)
-            .map_err(|e| PdfError::Generation(format!("PDF save failed: {}", e)))?;
-
-        Ok(())
+        Ok(pdf)
     }
 
     fn build_page(
@@ -343,7 +365,7 @@ impl PdfRenderer {
                         .replace(')', "\\)");
                     content.push_str(&format!("({}) Tj\n", escaped));
                 } else {
-                    content.push_str(&build_tj_array(&run));
+                    content.push_str(&build_tj_array(run));
                 }
 
                 content.push_str("ET\n");
@@ -529,7 +551,7 @@ fn build_tj_array(run: &perfect_print_core::draw::TextRun) -> String {
     let scale = 1000.0 / font_size;
 
     let mut result = String::new();
-    result.push_str("[");
+    result.push('[');
 
     // Group glyphs by cluster
     let mut cluster_map: std::collections::HashMap<u32, Vec<&ShapedGlyph>> =
@@ -584,6 +606,20 @@ mod tests {
     use perfect_print_core::draw::DrawCommand;
     use perfect_print_core::page::PageSize;
     use perfect_print_core::units::Rect;
+
+    #[test]
+    fn render_to_bytes_returns_loadable_pdf_without_temp_files() {
+        let model = DocumentBuilder::new()
+            .page(PageSize::Letter)
+            .build()
+            .unwrap();
+
+        let bytes = PdfRenderer::new().render_to_bytes(&model).unwrap();
+
+        assert_eq!(&bytes[..5], b"%PDF-");
+        let parsed = lopdf::Document::load_mem(&bytes).unwrap();
+        assert_eq!(parsed.get_pages().len(), 1);
+    }
 
     #[test]
     fn render_letter_to_pdf() {
