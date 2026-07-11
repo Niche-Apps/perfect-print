@@ -19,7 +19,9 @@ use perfect_print_dialog::{
 use perfect_print_core::page::PageSize;
 
 #[cfg(target_os = "windows")]
-use windows::{core::*, Win32::Graphics::Printing::*, Win32::System::WindowsProgramming::*};
+use windows::{
+    core::*, Win32::Foundation::*, Win32::Graphics::Gdi::*, Win32::Graphics::Printing::*,
+};
 
 /// Windows native print backend.
 pub struct WindowsPrintDialog;
@@ -81,13 +83,12 @@ impl WindowsPrintDialog {
             };
 
             let name = unsafe {
-                let slice = std::slice::from_raw_parts(
-                    info.pPrinterName.as_ptr() as *const u8,
-                    info.pPrinterName.len(),
-                );
-                String::from_utf8_lossy(slice)
-                    .trim_end_matches('\0')
-                    .to_string()
+                if info.pPrinterName.is_null() {
+                    continue;
+                }
+                std::ffi::CStr::from_ptr(info.pPrinterName.as_ptr() as *const i8)
+                    .to_string_lossy()
+                    .into_owned()
             };
 
             let is_default = info.Attributes & PRINTER_ATTRIBUTE_DEFAULT != 0;
@@ -100,12 +101,13 @@ impl WindowsPrintDialog {
             // Check the DEVMODE for capabilities
             if !info.pDevMode.is_null() {
                 let devmode = unsafe { &*info.pDevMode };
-                supports_color = devmode.dmColor == DMCOLOR_COLOR as i16;
-                supports_duplex = devmode.dmDuplex != DMDUP_SIMPLEX as i16;
+                supports_color = devmode.dmColor == DMCOLOR_COLOR;
+                supports_duplex = devmode.dmDuplex != DMDUP_SIMPLEX;
 
                 // Map paper size from dmPaperSize
-                if devmode.dmPaperSize != 0 {
-                    if let Some(ps) = paper_size_from_win32(devmode.dmPaperSize) {
+                let paper_size = unsafe { devmode.Anonymous1.Anonymous1.dmPaperSize };
+                if paper_size != 0 {
+                    if let Some(ps) = paper_size_from_win32(paper_size as u16) {
                         if !paper_sizes.contains(&ps) {
                             paper_sizes.push(ps);
                         }
@@ -160,7 +162,7 @@ impl WindowsPrintDialog {
         // Use GetDefaultPrinter
         let mut needed: u32 = 0;
         unsafe {
-            let _ = GetDefaultPrinterA(None, &mut needed);
+            let _ = GetDefaultPrinterA(PSTR::null(), &mut needed);
         }
         if needed == 0 {
             return None;
@@ -168,7 +170,9 @@ impl WindowsPrintDialog {
 
         let mut buffer: Vec<u8> = vec![0; needed as usize];
         unsafe {
-            GetDefaultPrinterA(Some(&mut buffer), &mut needed).ok()?;
+            if !GetDefaultPrinterA(PSTR(buffer.as_mut_ptr()), &mut needed).as_bool() {
+                return None;
+            }
         }
 
         let name = String::from_utf8_lossy(&buffer)
@@ -195,12 +199,10 @@ impl WindowsPrintDialog {
             ))
         })?;
 
-        let printer_name = self
-            .get_default_printer_name()
-            .ok_or(PrintError::NoPrinters)?;
+        let printer_name = Self::get_default_printer_name().ok_or(PrintError::NoPrinters)?;
 
         // Open the printer
-        let mut hprinter = PRINTER_HANDLE::default();
+        let mut hprinter = HANDLE::default();
         let printer_name_cstr = std::ffi::CString::new(printer_name.clone())
             .map_err(|e| PrintError::Platform(format!("Invalid printer name: {}", e)))?;
 
@@ -217,9 +219,9 @@ impl WindowsPrintDialog {
         let doc_name = "perfect-print job";
         let doc_name_cstr = std::ffi::CString::new(doc_name).unwrap();
         let doc_info = DOC_INFO_1A {
-            pDocName: PCSTR(doc_name_cstr.as_ptr() as *const u8),
-            pOutputFile: PCSTR::null(),
-            pDatatype: PCSTR::null(),
+            pDocName: PSTR(doc_name_cstr.as_ptr() as *mut u8),
+            pOutputFile: PSTR::null(),
+            pDatatype: PSTR::null(),
         };
 
         // Start the document
@@ -233,7 +235,7 @@ impl WindowsPrintDialog {
 
         // Start a page
         unsafe {
-            if StartPagePrinter(hprinter) == 0 {
+            if !StartPagePrinter(hprinter).as_bool() {
                 EndDocPrinter(hprinter);
                 ClosePrinter(hprinter);
                 return Err(PrintError::PrintFailed(
@@ -251,7 +253,7 @@ impl WindowsPrintDialog {
                 pdf_data.len() as u32,
                 &mut written,
             );
-            if result == 0 {
+            if !result.as_bool() {
                 EndPagePrinter(hprinter);
                 EndDocPrinter(hprinter);
                 ClosePrinter(hprinter);
@@ -273,7 +275,7 @@ impl WindowsPrintDialog {
             job_id
         );
 
-        Some(format!("{}-{}", printer_name, job_id)).into_ok()
+        Ok(Some(format!("{}-{}", printer_name, job_id)))
     }
 
     /// Poll the status of a print job.
@@ -291,7 +293,7 @@ impl WindowsPrintDialog {
         let printer_name_cstr = std::ffi::CString::new(printer_name)
             .map_err(|e| PrintError::Platform(format!("Invalid printer name: {}", e)))?;
 
-        let mut hprinter = PRINTER_HANDLE::default();
+        let mut hprinter = HANDLE::default();
         unsafe {
             OpenPrinterA(
                 PCSTR(printer_name_cstr.as_ptr() as *const u8),
@@ -304,7 +306,7 @@ impl WindowsPrintDialog {
         // Query job info
         let mut needed: u32 = 0;
         unsafe {
-            let _ = GetJobA(hprinter, job_num, 1, None, 0, &mut needed);
+            let _ = GetJobA(hprinter, job_num, 1, None, &mut needed);
         }
 
         if needed == 0 {
@@ -314,12 +316,11 @@ impl WindowsPrintDialog {
         }
 
         let mut buffer: Vec<u8> = vec![0; needed as usize];
-        let result =
-            unsafe { GetJobA(hprinter, job_num, 1, Some(&mut buffer), needed, &mut needed) };
+        let result = unsafe { GetJobA(hprinter, job_num, 1, Some(&mut buffer), &mut needed) };
 
         unsafe { ClosePrinter(hprinter) };
 
-        if result.is_err() {
+        if !result.as_bool() {
             // Job not found, assume completed
             return Ok(true);
         }
@@ -328,8 +329,8 @@ impl WindowsPrintDialog {
 
         // Check status flags
         let still_queued = job_info.Status == 0
-            || job_info.Status & (JOB_STATUS_PRINTING.0 as u32) != 0
-            || job_info.Status & (JOB_STATUS_SPOOLING.0 as u32) != 0;
+            || job_info.Status & JOB_STATUS_PRINTING != 0
+            || job_info.Status & JOB_STATUS_SPOOLING != 0;
 
         Ok(!still_queued)
     }
@@ -344,7 +345,7 @@ impl WindowsPrintDialog {
             let printer_name_cstr = std::ffi::CString::new(printer.capabilities.name.clone())
                 .map_err(|e| PrintError::Platform(format!("Invalid printer name: {}", e)))?;
 
-            let mut hprinter = PRINTER_HANDLE::default();
+            let mut hprinter = HANDLE::default();
             unsafe {
                 if OpenPrinterA(
                     PCSTR(printer_name_cstr.as_ptr() as *const u8),
@@ -361,7 +362,7 @@ impl WindowsPrintDialog {
             let mut needed: u32 = 0;
             let mut returned: u32 = 0;
             unsafe {
-                let _ = EnumJobsA(hprinter, 0, 0xFFFF, 1, None, 0, &mut needed, &mut returned);
+                let _ = EnumJobsA(hprinter, 0, 0xFFFF, 1, None, &mut needed, &mut returned);
             }
 
             if needed > 0 && returned > 0 {
@@ -373,7 +374,6 @@ impl WindowsPrintDialog {
                         0xFFFF,
                         1,
                         Some(&mut buffer),
-                        needed,
                         &mut needed,
                         &mut returned,
                     )
@@ -384,15 +384,14 @@ impl WindowsPrintDialog {
                                 &*(buffer.as_ptr().add(i * std::mem::size_of::<JOB_INFO_1A>())
                                     as *const JOB_INFO_1A);
                             let id = format!("{}-{}", printer.capabilities.name, info.JobId);
-                            let status = if info.Status == 0
-                                || (info.Status & (JOB_STATUS_PRINTING.0 as u32) != 0)
-                            {
-                                "printing"
-                            } else if info.Status & (JOB_STATUS_SPOOLING.0 as u32) != 0 {
-                                "spooling"
-                            } else {
-                                "queued"
-                            };
+                            let status =
+                                if info.Status == 0 || (info.Status & JOB_STATUS_PRINTING != 0) {
+                                    "printing"
+                                } else if info.Status & JOB_STATUS_SPOOLING != 0 {
+                                    "spooling"
+                                } else {
+                                    "queued"
+                                };
                             jobs.push((id, printer.capabilities.name.clone(), status.to_string()));
                         }
                     }
@@ -419,7 +418,7 @@ impl WindowsPrintDialog {
         let printer_name_cstr = std::ffi::CString::new(printer_name)
             .map_err(|e| PrintError::Platform(format!("Invalid printer name: {}", e)))?;
 
-        let mut hprinter = PRINTER_HANDLE::default();
+        let mut hprinter = HANDLE::default();
         unsafe {
             OpenPrinterA(
                 PCSTR(printer_name_cstr.as_ptr() as *const u8),
@@ -428,8 +427,10 @@ impl WindowsPrintDialog {
             )
             .map_err(|e| PrintError::Platform(format!("OpenPrinter failed: {}", e)))?;
 
-            SetJobA(hprinter, job_num, 0, None, JOB_CONTROL_CANCEL.0 as u32)
-                .map_err(|e| PrintError::PrintFailed(format!("SetJob cancel failed: {}", e)))?;
+            if !SetJobA(hprinter, job_num, 0, None, JOB_CONTROL_CANCEL).as_bool() {
+                ClosePrinter(hprinter);
+                return Err(PrintError::PrintFailed("SetJob cancel failed".to_string()));
+            }
 
             ClosePrinter(hprinter);
         }
