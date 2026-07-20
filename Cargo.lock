@@ -4913,6 +4913,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "perfect-print-html"
+version = "0.1.0"
+dependencies = [
+ "tempfile",
+ "thiserror 2.0.18",
+ "url",
+]
+
+[[package]]
 name = "perfect-print-iced"
 version = "0.1.0"
 dependencies = [

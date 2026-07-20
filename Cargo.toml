@@ -16,6 +16,7 @@ members = [
     "crates/perfect-print-egui",
     "crates/perfect-print-iced",
     "crates/perfect-print-cli",
+    "crates/perfect-print-html",
     "crates/perfect-print-integration",
     "crates/perfect-print-barcode",
     "fuzz",
