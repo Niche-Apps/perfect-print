@@ -740,6 +740,7 @@ fn merge_styles(default: &TextStyle, paragraph: &TextStyle) -> TextStyle {
         italic: paragraph.italic || default.italic,
         underline: paragraph.underline || default.underline,
         strikethrough: paragraph.strikethrough || default.strikethrough,
+        white_space: paragraph.white_space,
     }
 }
 

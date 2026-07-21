@@ -11,7 +11,7 @@ use ego_tree::NodeRef;
 use scraper::{ElementRef, Html, Node, Selector};
 
 use perfect_print_core::color::Color;
-use perfect_print_core::draw::{DrawCommand, TextAlign, TextStyle};
+use perfect_print_core::draw::{DrawCommand, TextAlign, TextStyle, WhiteSpace};
 use perfect_print_core::font::FontRef;
 use perfect_print_core::image::ImageData;
 use perfect_print_core::page::{Margins, PageSize};
@@ -378,6 +378,15 @@ fn apply_declarations(
                     }
                 }
             }
+            "white-space" => {
+                let v = d.value.trim().to_ascii_lowercase();
+                match v.as_str() {
+                    "normal" => style.white_space = WhiteSpace::Normal,
+                    "pre-wrap" => style.white_space = WhiteSpace::PreWrap,
+                    "pre-line" => style.white_space = WhiteSpace::PreLine,
+                    _ => warnings.push(format!("unsupported white-space: {}", d.value)),
+                }
+            }
             "object-fit" => {
                 let v = d.value.trim().to_ascii_lowercase();
                 match v.as_str() {
@@ -734,10 +743,37 @@ impl Converter {
         spans: &mut Vec<StyledSpan>,
     ) {
         if let Some(text) = node.value().as_text() {
-            spans.push(StyledSpan {
-                text: text.to_string(),
-                style: style.clone(),
-            });
+            // `white-space: pre-wrap`/`pre-line` preserve literal `\n` as a
+            // forced line break, same as `<br>`: split the text node on
+            // newlines and interleave `BR_MARKER` spans so the existing
+            // `split_on_br` machinery handles both uniformly. Under `normal`
+            // (the default), newlines fall through to `collapse_whitespace`
+            // downstream and become plain spaces, unchanged from before.
+            if style.white_space == WhiteSpace::Normal {
+                spans.push(StyledSpan {
+                    text: text.to_string(),
+                    style: style.clone(),
+                });
+            } else {
+                let raw = text.to_string();
+                let mut parts = raw.split('\n');
+                if let Some(first) = parts.next() {
+                    spans.push(StyledSpan {
+                        text: first.to_string(),
+                        style: style.clone(),
+                    });
+                }
+                for part in parts {
+                    spans.push(StyledSpan {
+                        text: BR_MARKER.to_string(),
+                        style: style.clone(),
+                    });
+                    spans.push(StyledSpan {
+                        text: part.to_string(),
+                        style: style.clone(),
+                    });
+                }
+            }
             return;
         }
 
@@ -1264,6 +1300,68 @@ mod tests {
             .any(|b| matches!(b, ContentBlock::Commands(_)));
         assert!(has_commands, "hr should emit a Commands block");
         assert!(c.warnings.is_empty(), "supported markup should not warn");
+    }
+
+    #[test]
+    fn pre_wrap_newlines_force_line_breaks() {
+        let c = blocks_of(
+            r#"<div style="position:absolute;left:0;top:0;white-space:pre-wrap">A
+B
+C</div>"#,
+        );
+        let ContentBlock::Positioned { blocks, .. } = &c.blocks[0] else {
+            panic!("expected Positioned, got {:?}", c.blocks[0]);
+        };
+        let rich_paragraphs: Vec<_> = blocks
+            .iter()
+            .filter(|b| matches!(b, ContentBlock::RichParagraph { .. }))
+            .collect();
+        assert_eq!(
+            rich_paragraphs.len(),
+            3,
+            "pre-wrap newlines should force three separate line breaks, got {:?}",
+            blocks
+        );
+        for (i, expected) in ["A", "B", "C"].iter().enumerate() {
+            let ContentBlock::RichParagraph { spans, .. } = rich_paragraphs[i] else {
+                panic!("expected RichParagraph");
+            };
+            let text: String = spans.iter().map(|s| s.text.as_str()).collect();
+            assert_eq!(text, *expected);
+        }
+    }
+
+    #[test]
+    fn pre_line_collapses_interior_whitespace_but_keeps_newlines() {
+        let c = blocks_of(
+            r#"<div style="position:absolute;left:0;top:0;white-space:pre-line">A
+   B</div>"#,
+        );
+        let ContentBlock::Positioned { blocks, .. } = &c.blocks[0] else {
+            panic!("expected Positioned, got {:?}", c.blocks[0]);
+        };
+        let rich_paragraphs: Vec<_> = blocks
+            .iter()
+            .filter(|b| matches!(b, ContentBlock::RichParagraph { .. }))
+            .collect();
+        assert_eq!(rich_paragraphs.len(), 2, "expected two clean lines");
+        for (i, expected) in ["A", "B"].iter().enumerate() {
+            let ContentBlock::RichParagraph { spans, .. } = rich_paragraphs[i] else {
+                panic!("expected RichParagraph");
+            };
+            let text: String = spans.iter().map(|s| s.text.as_str()).collect();
+            assert_eq!(text, *expected);
+        }
+    }
+
+    #[test]
+    fn newline_without_white_space_collapses_to_space() {
+        let c = blocks_of("<div>A\nB</div>");
+        let ContentBlock::RichParagraph { spans, .. } = &c.blocks[0] else {
+            panic!("expected RichParagraph, got {:?}", c.blocks[0]);
+        };
+        let text: String = spans.iter().map(|s| s.text.as_str()).collect();
+        assert_eq!(text, "A B", "default white-space should collapse \\n to a space");
     }
 
     #[test]

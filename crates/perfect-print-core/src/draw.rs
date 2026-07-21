@@ -13,6 +13,19 @@ pub enum TextAlign {
     Justified,
 }
 
+/// CSS `white-space` handling for how literal whitespace in source text is
+/// collapsed. `PreLine` collapses runs of spaces/tabs to one but preserves
+/// `\n` as a forced line break; `PreWrap` is meant to additionally preserve
+/// runs of interior spaces, but this converter treats it identically to
+/// `PreLine` (documented simplification — see `docs/html-css-support.md`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
+pub enum WhiteSpace {
+    #[default]
+    Normal,
+    PreWrap,
+    PreLine,
+}
+
 /// Line cap style for paths.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum LineCap {
@@ -49,6 +62,11 @@ pub struct TextStyle {
     pub italic: bool,
     pub underline: bool,
     pub strikethrough: bool,
+    /// CSS `white-space` (inherited). Only consulted by the HTML converter
+    /// when deciding how to collapse literal whitespace in source text;
+    /// rendering/layout ignore it.
+    #[serde(default)]
+    pub white_space: WhiteSpace,
 }
 
 impl TextStyle {
@@ -64,6 +82,7 @@ impl TextStyle {
             italic: false,
             underline: false,
             strikethrough: false,
+            white_space: WhiteSpace::Normal,
         }
     }
 }

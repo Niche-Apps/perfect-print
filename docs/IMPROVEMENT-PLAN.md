@@ -407,3 +407,58 @@ Fixed (still `feature/absolute-positioning`'s follow-on work, merged to
 - `docs/html-css-support.md` gained an "Image sizing" section documenting
   the precedence chain, and `%`/`height`/`object-fit` are now listed as
   supported properties.
+
+## 2026-07-21: `white-space: pre-wrap` / `pre-line` support
+
+Root cause: PlainBooks emits customer/address blocks as
+`<div style="...;white-space:pre-wrap;">Russ Johnson\n24604 Blue Goose
+Rd\nBokoshe, OK</div>` — literal `\n` characters, no `<br>`. `white-space`
+hit the `apply_declarations` catch-all (`unsupported CSS property:
+white-space`), so the property had no effect, and the newlines fell into
+`collapse_whitespace`'s normal-HTML rule (any run of `[\t\n\r ]` → one
+space), collapsing a three-line address into a single run-on line on the
+printed page.
+
+Fixed (TDD, failing tests written first):
+
+- **`perfect_print_core::draw::WhiteSpace`** — new inherited enum
+  (`Normal` (default) / `PreWrap` / `PreLine`) added to `TextStyle`, since
+  `white-space` inherits down the DOM the same way font/color/align do and
+  `TextStyle` is already the vehicle `apply_declarations`/`resolve` thread
+  for inherited properties. Only the HTML converter consults it — layout
+  and rendering carry the field but ignore it, so it's a no-op everywhere
+  else in the workspace. `merge_styles` (`perfect-print-layout/src/flow.rs`)
+  updated to pass it through (paragraph style wins, matching every other
+  field in that merge).
+- **`apply_declarations`** gained a `"white-space"` arm parsing
+  `normal`/`pre-wrap`/`pre-line`; other values (`nowrap`, `pre`,
+  `break-spaces`, ...) still warn via `unsupported white-space: {value}`
+  (the property is removed from the generic catch-all only for the values
+  actually handled).
+- **`Converter::collect_inline_node`**: when the active style's
+  `white_space` is not `Normal`, a text node's literal `\n` characters are
+  now split out and replaced with the same `BR_MARKER` spans `<br>` already
+  uses, before whitespace collapsing runs — so `split_on_br` and
+  `collapse_span_whitespace` (unchanged) handle pre-wrap/pre-line text
+  exactly like hand-authored `<br>` markup: each line becomes its own
+  `RichParagraph`, and remaining interior space/tab runs still collapse to
+  one space per line (`pre-line` semantics). `pre-wrap` is treated
+  identically to `pre-line` — see the "Simplification" note in
+  `docs/html-css-support.md`'s new `white-space` section for why (no
+  whitespace-preserving text run type exists in the layout engine, and
+  nothing in the observed PlainBooks templates needs literal space runs
+  preserved).
+- Under the default `normal`, behavior is byte-for-byte unchanged — a
+  `\n` still collapses to a single space.
+- **Tests** (`crates/perfect-print-html/src/convert.rs`): a
+  `position:absolute` div with `white-space:pre-wrap` and text `A\nB\nC`
+  produces three separate `RichParagraph` blocks (mirroring how the
+  existing `hr_becomes_rule_and_br_breaks` test asserts `<br>` splits into
+  separate paragraphs); `white-space:pre-line` with `"A\n   B"` collapses
+  the interior run to two clean lines (`"A"`, `"B"`); a plain `<div>A\nB</div>`
+  with no `white-space` set still collapses to `"A B"`. `cargo test -p
+  perfect-print-html` and `cargo test --workspace` both green, no
+  regressions.
+- `docs/html-css-support.md`: `white-space` added to the supported CSS
+  properties list, with a new `## white-space` section documenting the
+  `pre-wrap`≈`pre-line` simplification.

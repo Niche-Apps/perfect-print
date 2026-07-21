@@ -58,6 +58,30 @@ positioned elements — so a template authored entirely in inches (e.g.
 - `height` on `position: absolute` elements (any supported length unit; establishes the positioned box's height for percentage resolution — see [image sizing](#image-sizing) below. On other elements `height` is parsed but has no layout effect since block heights are content-driven.)
 - `width`/`height` as a percentage (`%`) on an `<img>` — resolved against the nearest enclosing `position: absolute` container's box (see [image sizing](#image-sizing))
 - `object-fit` (`contain`, `fill`) on `<img>` (see [image sizing](#image-sizing))
+- `white-space` (`normal`, `pre-wrap`, `pre-line`; inherited — see [`white-space`](#white-space) below. Other values, e.g. `nowrap`/`pre`/`break-spaces`, are unsupported and warn.)
+
+## `white-space`
+
+`white-space: normal` (the default) matches HTML's usual behavior: any run
+of spaces/tabs/newlines in source text collapses to a single space, so a
+literal `\n` in the DOM (common in server-rendered templates that interpolate
+multi-line values into a `<div>` without `<br>`) collapses away and the text
+renders as one run-on line.
+
+`white-space: pre-wrap` and `white-space: pre-line` both preserve literal
+`\n` characters as forced line breaks — the same mechanism `<br>` uses
+internally (splitting the span stream on a marker, then laying each segment
+out as its own line/paragraph). Runs of interior spaces/tabs are still
+collapsed to a single space in both modes.
+
+**Simplification:** per the CSS spec, `pre-wrap` should additionally preserve
+runs of interior whitespace (only wrapping, not collapsing, spaces). This
+converter does not make that distinction — `pre-wrap` is treated identically
+to `pre-line` (newlines preserved, interior whitespace runs collapsed to one
+space). This covers the common case (server-rendered address/note blocks with
+real newlines) without the added complexity of a true whitespace-preserving
+text run type in the layout engine. Revisit if a template needs
+whitespace-significant `pre-wrap` rendering.
 
 ## `position: absolute`
 
