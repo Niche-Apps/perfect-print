@@ -559,6 +559,12 @@ impl ParagraphEngine {
         let mut x = 0.0;
         let mut max_height: f64 = 0.0;
         let mut last_style = TextStyle::new(FontRef::new("Helvetica"), 12.0);
+        // Byte offset of the current word within the line's final text (words
+        // joined with single spaces). Shaping runs per word, so each word's
+        // glyph clusters are word-relative; renderers (e.g. the PDF writer's
+        // TJ emission) expect clusters to be byte offsets into the whole
+        // line text, so rebase them as we go.
+        let mut word_byte_offset = 0usize;
 
         for (index, (word, style)) in words.iter().enumerate() {
             let line_height = style.line_height.unwrap_or(style.size * 1.2);
@@ -586,7 +592,7 @@ impl ParagraphEngine {
                 x += fallback_width;
             } else {
                 let mut pen_x = x;
-                for glyph in word_glyphs {
+                for mut glyph in word_glyphs {
                     positioned.push(PositionedGlyph {
                         glyph_id: glyph.glyph_id,
                         x: pen_x + glyph.x_offset,
@@ -595,10 +601,13 @@ impl ParagraphEngine {
                         font_index: glyph.font_index,
                     });
                     pen_x += glyph.x_advance;
+                    glyph.cluster += word_byte_offset as u32;
                     shaped_glyphs.push(glyph);
                 }
                 x = pen_x;
             }
+
+            word_byte_offset += word.len() + 1; // +1 for the joining space
 
             if index + 1 < words.len() {
                 let space_w = font
@@ -699,6 +708,11 @@ impl ParagraphEngine {
         let mut frag_words: Vec<&str> = Vec::new();
         let mut frag_style: Option<TextStyle> = None;
         let mut x = 0.0;
+        // Byte offset of the current word within the *fragment's* text (its
+        // words joined with single spaces). Per-word shaping yields
+        // word-relative clusters; rebase them so each fragment's clusters
+        // index its own `text`, as renderers expect.
+        let mut word_byte_offset = 0usize;
 
         for (index, (word, style)) in words.iter().enumerate() {
             if let Some(active) = &frag_style {
@@ -715,6 +729,7 @@ impl ParagraphEngine {
                         active.clone(),
                     ));
                     frag_words.clear();
+                    word_byte_offset = 0;
                 }
             }
             frag_style = Some(style.clone());
@@ -740,7 +755,7 @@ impl ParagraphEngine {
                 x += fallback_width;
             } else {
                 let mut pen_x = x;
-                for glyph in word_glyphs {
+                for mut glyph in word_glyphs {
                     positioned.push(PositionedGlyph {
                         glyph_id: glyph.glyph_id,
                         x: pen_x + glyph.x_offset,
@@ -749,12 +764,14 @@ impl ParagraphEngine {
                         font_index: glyph.font_index,
                     });
                     pen_x += glyph.x_advance;
+                    glyph.cluster += word_byte_offset as u32;
                     shaped_glyphs.push(glyph);
                 }
                 x = pen_x;
             }
 
             frag_words.push(word.as_str());
+            word_byte_offset += word.len() + 1; // +1 for the joining space
 
             if index + 1 < words.len() {
                 let space_w = font
@@ -888,6 +905,74 @@ mod tests {
             "mixed-style run layout must preserve shaped glyphs for renderers"
         );
         assert_eq!(line.glyphs.len(), line.shaped_glyphs.len());
+    }
+
+    /// Assert the cluster contract PDF text emission relies on: every
+    /// non-whitespace character in the line's text has a shaped glyph whose
+    /// cluster equals that character's byte offset in the text. (Whole-line
+    /// shaping also emits space glyphs; per-word shaping does not — both
+    /// satisfy this containment check.)
+    fn assert_clusters_cover_text(text: &str, shaped_glyphs: &[ShapedGlyph]) {
+        let clusters: std::collections::HashSet<u32> =
+            shaped_glyphs.iter().map(|g| g.cluster).collect();
+        for (byte_idx, ch) in text.char_indices() {
+            if ch.is_whitespace() {
+                continue;
+            }
+            assert!(
+                clusters.contains(&(byte_idx as u32)),
+                "char {:?} at byte {} of {:?} has no shaped glyph with a matching cluster",
+                ch,
+                byte_idx,
+                text
+            );
+        }
+    }
+
+    #[test]
+    fn test_wrapped_run_clusters_are_line_relative_byte_offsets() {
+        let mut engine = ParagraphEngine::new();
+        let text =
+            "Hello World from PlainBooks. This is a test invoice line with normal spacing.";
+        // layout_runs takes the per-word shaping path (layout_word_run),
+        // where word-relative clusters used to leak through un-rebased.
+        let layout = engine.layout_runs(&[(text.to_string(), test_style())], 200.0);
+        assert!(layout.line_count() > 1, "narrow width should wrap");
+        for line in &layout.lines {
+            assert_clusters_cover_text(&line.text, &line.shaped_glyphs);
+        }
+    }
+
+    #[test]
+    fn test_wrapped_paragraph_clusters_are_line_relative_byte_offsets() {
+        let mut engine = ParagraphEngine::new();
+        let text =
+            "Hello World from PlainBooks. This is a test invoice line with normal spacing.";
+        let layout = engine.layout_paragraph(text, &test_style(), 200.0);
+        assert!(layout.line_count() > 1, "narrow width should wrap");
+        for line in &layout.lines {
+            assert_clusters_cover_text(&line.text, &line.shaped_glyphs);
+        }
+    }
+
+    #[test]
+    fn test_fragment_clusters_are_fragment_relative_byte_offsets() {
+        let mut engine = ParagraphEngine::new();
+        let mut bold = test_style();
+        bold.bold = true;
+        let rows = engine.layout_spans_fragmented(
+            &[
+                ("Hello brave".to_string(), test_style()),
+                ("new World again".to_string(), bold),
+            ],
+            500.0,
+        );
+        assert!(!rows.is_empty());
+        for row in &rows {
+            for frag in row {
+                assert_clusters_cover_text(&frag.text, &frag.shaped_glyphs);
+            }
+        }
     }
 
     #[test]
