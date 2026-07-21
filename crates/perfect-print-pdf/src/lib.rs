@@ -98,27 +98,49 @@ impl PdfRenderer {
             ));
         }
 
-        // Embed each font: (font_key, font_object_id)
-        let mut embedded_fonts: Vec<(PdfFontKey, lopdf::ObjectId)> = Vec::new();
+        // Embed each font.
+        let mut embedded_fonts: Vec<EmbeddedFont> = Vec::new();
         for key in &font_keys {
             let mut font_embedded = false;
             if let Some((font_data, face_index)) = font_loader.get_font_data_for(&key.to_properties())
             {
-                let (descriptor_id, _) = embed_truetype_font(
+                let (descriptor_id, _, first_char, last_char, widths) = embed_truetype_font(
                     &mut pdf,
                     &font_data,
                     face_index,
                     &key.base_font_name(),
                 );
-                let font_obj = pdf_embedded_font(&key.base_font_name(), descriptor_id);
+                let font_obj = pdf_embedded_font(
+                    &key.base_font_name(),
+                    descriptor_id,
+                    first_char,
+                    last_char,
+                    &widths,
+                );
                 let font_id = pdf.add_object(font_obj);
-                embedded_fonts.push((key.clone(), font_id));
+                embedded_fonts.push(EmbeddedFont {
+                    key: key.clone(),
+                    font_id,
+                    // Same range as PDF_FONT_FIRST_CHAR/PDF_FONT_LAST_CHAR;
+                    // kept alongside the widths so callers building TJ
+                    // arrays can look up a code's declared /Widths entry
+                    // without recomputing font metrics.
+                    first_char,
+                    widths: Some(widths),
+                });
                 font_embedded = true;
             }
             if !font_embedded {
-                // Fallback: use standard Type1 font (not embedded)
+                // Fallback: use standard Type1 font (not embedded). The
+                // reader supplies metrics for the 14 standard fonts itself,
+                // so there's no /Widths array for us to reason about here.
                 let font_id = pdf.add_object(pdf_font_descriptor(&key.base_font_name()));
-                embedded_fonts.push((key.clone(), font_id));
+                embedded_fonts.push(EmbeddedFont {
+                    key: key.clone(),
+                    font_id,
+                    first_char: PDF_FONT_FIRST_CHAR,
+                    widths: None,
+                });
             }
         }
 
@@ -180,7 +202,7 @@ impl PdfRenderer {
         pdf: &mut lopdf::Document,
         page: &perfect_print_core::page::Page,
         parent_id: lopdf::ObjectId,
-        embedded_fonts: &[(PdfFontKey, lopdf::ObjectId)],
+        embedded_fonts: &[EmbeddedFont],
         image_store: &perfect_print_core::resource::ImageStore,
     ) -> PdfResult<lopdf::ObjectId> {
         use lopdf::{Dictionary, Object, Stream};
@@ -251,9 +273,9 @@ impl PdfRenderer {
         // Build resources with fonts and xobjects
         let mut res = Dictionary::new();
         let mut fonts = Dictionary::new();
-        for (i, (_font_name, font_id)) in embedded_fonts.iter().enumerate() {
+        for (i, embedded) in embedded_fonts.iter().enumerate() {
             let font_key = format!("F{}", i + 1);
-            fonts.set(font_key.as_str(), Object::Reference(*font_id));
+            fonts.set(font_key.as_str(), Object::Reference(embedded.font_id));
         }
         // Ensure at least F1 exists
         if embedded_fonts.is_empty() {
@@ -325,7 +347,7 @@ impl PdfRenderer {
         cmd: &DrawCommand,
         page_height: f64,
         xobject_names: &[(String, lopdf::ObjectId)],
-        embedded_fonts: &[(PdfFontKey, lopdf::ObjectId)],
+        embedded_fonts: &[EmbeddedFont],
     ) -> PdfResult<()> {
         match cmd {
             DrawCommand::FillRect { rect, color } => {
@@ -375,7 +397,7 @@ impl PdfRenderer {
                 // family AND bold/italic so the glyph IDs (shaped against a
                 // specific face) line up with the embedded face.
                 let key = PdfFontKey::from_style(&run.style);
-                let font_key = find_font_key(&key, embedded_fonts);
+                let (font_key, font_widths) = find_font(&key, embedded_fonts);
                 content.push_str(&format!("/{} {} Tf\n", font_key, run.style.size));
                 content.push_str(&format!("{} {} Td\n", position.x, y));
 
@@ -387,7 +409,7 @@ impl PdfRenderer {
                         .replace(')', "\\)");
                     content.push_str(&format!("({}) Tj\n", escaped));
                 } else {
-                    content.push_str(&build_tj_array(run));
+                    content.push_str(&build_tj_array(run, font_widths));
                 }
 
                 content.push_str("ET\n");
@@ -526,14 +548,30 @@ impl PdfFontKey {
     }
 }
 
-/// Find the font key (e.g., "F1", "F2") for a given font in the embedded fonts list.
-fn find_font_key(key: &PdfFontKey, embedded_fonts: &[(PdfFontKey, lopdf::ObjectId)]) -> String {
-    for (i, (candidate, _)) in embedded_fonts.iter().enumerate() {
-        if candidate == key {
-            return format!("F{}", i + 1);
+/// An embedded (or standard, non-embedded) PDF font resource.
+pub struct EmbeddedFont {
+    key: PdfFontKey,
+    font_id: lopdf::ObjectId,
+    /// First code covered by `widths` (matches `PDF_FONT_FIRST_CHAR` for
+    /// embedded TrueType fonts). Unused when `widths` is `None`.
+    first_char: i64,
+    /// The exact `/Widths` values written into this font's dictionary, in
+    /// 1000-units-per-em text space, indexed by `code - first_char`. `None`
+    /// for the standard-Type1 fallback path, where the reader supplies its
+    /// own metrics for the 14 standard fonts and we have no declared
+    /// `/Widths` to stay consistent with.
+    widths: Option<Vec<i64>>,
+}
+
+/// Find the font resource name (e.g., "F1", "F2") and declared `/Widths`
+/// (if any) for a given font in the embedded fonts list.
+fn find_font<'a>(key: &PdfFontKey, embedded_fonts: &'a [EmbeddedFont]) -> (String, Option<&'a EmbeddedFont>) {
+    for (i, candidate) in embedded_fonts.iter().enumerate() {
+        if &candidate.key == key {
+            return (format!("F{}", i + 1), Some(candidate));
         }
     }
-    "F1".to_string() // fallback
+    ("F1".to_string(), None) // fallback
 }
 
 fn format_fill_color(color: &Color) -> String {
@@ -554,14 +592,92 @@ fn pdf_font_descriptor(name: &str) -> lopdf::Object {
     Object::Dictionary(dict)
 }
 
+/// First and last WinAnsi code emitted in `/FirstChar`/`/LastChar`/`/Widths`.
+/// We use the full 32..=255 range for every embedded font rather than
+/// computing the exact codes used by each run: it's simpler, always valid
+/// per ISO 32000-1 §9.6.2, and the extra entries cost little in a PDF that
+/// already embeds a whole font program.
+const PDF_FONT_FIRST_CHAR: i64 = 32;
+const PDF_FONT_LAST_CHAR: i64 = 255;
+
+/// Map a single-byte WinAnsiEncoding code to the Unicode scalar it
+/// represents, or `None` for codes that WinAnsi leaves undefined.
+///
+/// WinAnsiEncoding matches Windows-1252/CP1252:
+/// - 0x20..=0x7E: ASCII, unicode == code.
+/// - 0xA0..=0xFF: matches Latin-1, unicode == code.
+/// - 0x80..=0x9F: the CP1252 "control block" overrides — NOT Latin-1 (which
+///   leaves these as C1 control codes). Codes with no CP1252 mapping
+///   (0x81, 0x8D, 0x8F, 0x90, 0x9D) return `None`.
+fn winansi_code_to_unicode(code: u8) -> Option<char> {
+    match code {
+        0x20..=0x7E => Some(code as char),
+        0x80 => Some('\u{20AC}'),
+        0x81 => None,
+        0x82 => Some('\u{201A}'),
+        0x83 => Some('\u{0192}'),
+        0x84 => Some('\u{201E}'),
+        0x85 => Some('\u{2026}'),
+        0x86 => Some('\u{2020}'),
+        0x87 => Some('\u{2021}'),
+        0x88 => Some('\u{02C6}'),
+        0x89 => Some('\u{2030}'),
+        0x8A => Some('\u{0160}'),
+        0x8B => Some('\u{2039}'),
+        0x8C => Some('\u{0152}'),
+        0x8D => None,
+        0x8E => Some('\u{017D}'),
+        0x8F => None,
+        0x90 => None,
+        0x91 => Some('\u{2018}'),
+        0x92 => Some('\u{2019}'),
+        0x93 => Some('\u{201C}'),
+        0x94 => Some('\u{201D}'),
+        0x95 => Some('\u{2022}'),
+        0x96 => Some('\u{2013}'),
+        0x97 => Some('\u{2014}'),
+        0x98 => Some('\u{02DC}'),
+        0x99 => Some('\u{2122}'),
+        0x9A => Some('\u{0161}'),
+        0x9B => Some('\u{203A}'),
+        0x9C => Some('\u{0153}'),
+        0x9D => None,
+        0x9E => Some('\u{017E}'),
+        0x9F => Some('\u{0178}'),
+        0xA0..=0xFF => Some(code as char),
+        _ => None,
+    }
+}
+
+/// Compute the `/Widths` array (in 1000-units-per-em text space) for codes
+/// `PDF_FONT_FIRST_CHAR..=PDF_FONT_LAST_CHAR` against the same font face
+/// that gets embedded in `/FontFile2`. Codes with no WinAnsi mapping, or
+/// whose mapped character has no glyph in the face, get width 0 (rather
+/// than the `.notdef` advance — 0 is unambiguous and matches what most
+/// consumers already assume when a code is unused).
+fn compute_winansi_widths(face: &ttf_parser::Face) -> Vec<i64> {
+    let units_per_em = face.units_per_em() as f64;
+    let mut widths = Vec::with_capacity((PDF_FONT_LAST_CHAR - PDF_FONT_FIRST_CHAR + 1) as usize);
+    for code in PDF_FONT_FIRST_CHAR..=PDF_FONT_LAST_CHAR {
+        let width = winansi_code_to_unicode(code as u8)
+            .and_then(|ch| face.glyph_index(ch))
+            .and_then(|gid| face.glyph_hor_advance(gid))
+            .map(|adv| (adv as f64 * 1000.0 / units_per_em).round() as i64)
+            .unwrap_or(0);
+        widths.push(width);
+    }
+    widths
+}
+
 /// Embed a TrueType font in the PDF document.
-/// Returns the font descriptor object ID and the font file stream ID.
+/// Returns the font descriptor object ID, the font file stream ID, the
+/// FirstChar/LastChar range, and the /Widths array for that range.
 fn embed_truetype_font(
     pdf: &mut lopdf::Document,
     font_data: &[u8],
     face_index: u32,
     font_name: &str,
-) -> (lopdf::ObjectId, lopdf::ObjectId) {
+) -> (lopdf::ObjectId, lopdf::ObjectId, i64, i64, Vec<i64>) {
     use lopdf::{Dictionary, Object, Stream};
 
     // Parse basic font metrics from the raw TTF/TTC data using ttf-parser.
@@ -577,6 +693,12 @@ fn embed_truetype_font(
         .and_then(|f| f.capital_height())
         .map(|h| h as i64);
     let italic_angle = face.as_ref().map(|f| f.italic_angle()).unwrap_or(0.0);
+    // /Widths must come from the exact same face bytes/index used for
+    // `/FontFile2` below, or glyph metrics won't match the embedded outlines.
+    let widths = face
+        .as_ref()
+        .map(compute_winansi_widths)
+        .unwrap_or_else(|| vec![0; (PDF_FONT_LAST_CHAR - PDF_FONT_FIRST_CHAR + 1) as usize]);
 
     // PDF `/FontFile2` must contain a single sfnt font program, not a
     // `ttcf` TrueType Collection. On macOS most system fonts (e.g.
@@ -621,25 +743,131 @@ fn embed_truetype_font(
         descriptor.set("CapHeight", ch);
     }
     descriptor.set("StemV", 80_i64);
+    // Advance for codes outside FirstChar..=LastChar (there are none, since
+    // we cover the full 32..=255 range, but PDF readers may still consult
+    // this for .notdef fallback behavior).
+    descriptor.set("MissingWidth", 0_i64);
     descriptor.set("FontFile2", Object::Reference(font_file_id));
     let descriptor_id = pdf.add_object(Object::Dictionary(descriptor));
 
-    (descriptor_id, font_file_id)
+    (
+        descriptor_id,
+        font_file_id,
+        PDF_FONT_FIRST_CHAR,
+        PDF_FONT_LAST_CHAR,
+        widths,
+    )
 }
 
 /// Create a PDF Font dictionary for an embedded TrueType font.
-fn pdf_embedded_font(name: &str, descriptor_id: lopdf::ObjectId) -> lopdf::Object {
+///
+/// Per ISO 32000-1 §9.6.2, simple TrueType font dictionaries MUST include
+/// `/FirstChar`, `/LastChar`, and `/Widths`. Omitting them is spec-invalid:
+/// CoreGraphics logs "missing or invalid 'FirstChar' entry" and falls back
+/// to guessed glyph widths (wrong letter spacing), and strict CUPS/driver
+/// PDF->PostScript filters may drop the text run entirely.
+fn pdf_embedded_font(
+    name: &str,
+    descriptor_id: lopdf::ObjectId,
+    first_char: i64,
+    last_char: i64,
+    widths: &[i64],
+) -> lopdf::Object {
     use lopdf::{Dictionary, Object};
     let mut dict = Dictionary::new();
     dict.set("Type", "Font");
     dict.set("Subtype", "TrueType");
     dict.set("BaseFont", name);
     dict.set("Encoding", "WinAnsiEncoding");
+    dict.set("FirstChar", first_char);
+    dict.set("LastChar", last_char);
+    let widths_array: Vec<Object> = widths.iter().map(|w| Object::Integer(*w)).collect();
+    dict.set("Widths", Object::Array(widths_array));
     dict.set("FontDescriptor", Object::Reference(descriptor_id));
     Object::Dictionary(dict)
 }
 
-fn build_tj_array(run: &perfect_print_core::draw::TextRun) -> String {
+/// Reverse of `winansi_code_to_unicode`: map a Unicode scalar back to its
+/// single-byte WinAnsi code, if representable. `None` for anything outside
+/// WinAnsi's repertoire (e.g. non-Latin scripts) — those runs have no
+/// meaningful `/Widths` entry to reconcile against anyway, since they can't
+/// be represented under `/Encoding/WinAnsiEncoding` in the first place.
+fn char_to_winansi_code(ch: char) -> Option<u8> {
+    match ch {
+        ' '..='~' => Some(ch as u8),
+        '\u{20AC}' => Some(0x80),
+        '\u{201A}' => Some(0x82),
+        '\u{0192}' => Some(0x83),
+        '\u{201E}' => Some(0x84),
+        '\u{2026}' => Some(0x85),
+        '\u{2020}' => Some(0x86),
+        '\u{2021}' => Some(0x87),
+        '\u{02C6}' => Some(0x88),
+        '\u{2030}' => Some(0x89),
+        '\u{0160}' => Some(0x8A),
+        '\u{2039}' => Some(0x8B),
+        '\u{0152}' => Some(0x8C),
+        '\u{017D}' => Some(0x8E),
+        '\u{2018}' => Some(0x91),
+        '\u{2019}' => Some(0x92),
+        '\u{201C}' => Some(0x93),
+        '\u{201D}' => Some(0x94),
+        '\u{2022}' => Some(0x95),
+        '\u{2013}' => Some(0x96),
+        '\u{2014}' => Some(0x97),
+        '\u{02DC}' => Some(0x98),
+        '\u{2122}' => Some(0x99),
+        '\u{0161}' => Some(0x9A),
+        '\u{203A}' => Some(0x9B),
+        '\u{0153}' => Some(0x9C),
+        '\u{017E}' => Some(0x9E),
+        '\u{0178}' => Some(0x9F),
+        '\u{00A0}'..='\u{00FF}' => Some(ch as u8),
+        _ => None,
+    }
+}
+
+/// Look up a character's declared `/Widths` advance (1000-units-per-em) in
+/// the given font, or 0 if the font has no declared widths (standard Type1
+/// fallback) or the character has no WinAnsi code.
+fn declared_width_1000(font: Option<&EmbeddedFont>, ch: char) -> f64 {
+    let Some(font) = font else { return 0.0 };
+    let Some(widths) = font.widths.as_ref() else {
+        return 0.0;
+    };
+    let Some(code) = char_to_winansi_code(ch) else {
+        return 0.0;
+    };
+    let index = code as i64 - font.first_char;
+    if index < 0 {
+        return 0.0;
+    }
+    widths.get(index as usize).copied().unwrap_or(0) as f64
+}
+
+/// Build a PDF `TJ` array that places each glyph exactly at the shaper's
+/// computed advance (`ShapedGlyph::x_advance`, already in points at the
+/// run's font size).
+///
+/// A `TJ` string element is *not* an absolute advance: the reader first
+/// moves the pen by the glyph's own `/Widths` advance (declared in the font
+/// dictionary) and only then applies the adjustment number between
+/// elements, which is *subtracted* (in thousandths of text space) from that
+/// movement. So to make the reader land exactly at `shaped_advance` we must
+/// account for whatever the font's `/Widths` entry already contributes:
+///
+///   adjustment = declared_width_1000 - shaped_advance * (1000 / font_size)
+///
+/// Before the font dictionaries carried a `/Widths` array (see
+/// `pdf_embedded_font`), this term didn't exist in the PDF's data model at
+/// all — but conforming readers still need *some* value for the "declared"
+/// advance when none is given, and both CoreGraphics and Poppler fall back
+/// to the embedded font program's own `hmtx` advances (the same source
+/// `compute_winansi_widths` reads from) rather than 0. So `declared_width`
+/// was already implicitly non-zero pre-fix; omitting it here from the
+/// adjustment math double-counted every glyph's advance and produced the
+/// "I N V OI C E"-style spacing this function now corrects.
+fn build_tj_array(run: &perfect_print_core::draw::TextRun, font: Option<&EmbeddedFont>) -> String {
     use perfect_print_core::draw::ShapedGlyph;
 
     if run.glyphs.is_empty() {
@@ -671,18 +899,35 @@ fn build_tj_array(run: &perfect_print_core::draw::TextRun) -> String {
     let text = &run.text;
     let char_indices: Vec<(usize, char)> = text.char_indices().collect();
 
-    let mut first = true;
+    // The adjustment number sitting between string i-1 and string i in a TJ
+    // array applies to the pen movement *after* string i-1 is drawn: the
+    // reader advances by string i-1's own glyph's declared /Widths advance,
+    // then subtracts this adjustment, and only then draws string i. So the
+    // adjustment before string i must be derived from character i-1's
+    // shaped advance (what we *want* that movement to be) and character
+    // i-1's declared width (what the reader will apply by default) — not
+    // character i's. Track the previous character's shaped advance as we
+    // walk the run.
+    let mut prev: Option<(char, f64)> = None;
     for (byte_idx, ch) in &char_indices {
         let cluster = *byte_idx as u32;
-        let shaped_advance = cluster_advances.get(&cluster).copied().unwrap_or(0.0);
+        // Some characters in `run.text` may have no corresponding shaped
+        // glyph (e.g. a wrapped continuation the shaper never ran on). For
+        // those, fall back to the font's own declared advance rather than
+        // 0 — that makes the adjustment before/after this character
+        // resolve to ~0, leaving the reader's default (already-correct)
+        // font-metrics-based spacing untouched instead of corrupting it.
+        let shaped_advance = cluster_advances
+            .get(&cluster)
+            .copied()
+            .unwrap_or_else(|| declared_width_1000(font, *ch) / scale);
 
-        if !first {
-            let adjustment = -(shaped_advance * scale);
+        if let Some((prev_ch, prev_shaped_advance)) = prev {
+            let declared = declared_width_1000(font, prev_ch);
+            let adjustment = declared - (prev_shaped_advance * scale);
             result.push_str(&format!("{} ", adjustment));
         }
-        if first {
-            first = false;
-        }
+        prev = Some((*ch, shaped_advance));
 
         let escaped = ch
             .to_string()
@@ -940,5 +1185,115 @@ mod tests {
         );
 
         let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn pdf_font_dict_has_valid_widths_array() {
+        // Regression test for spec-invalid TrueType font dictionaries:
+        // ISO 32000-1 §9.6.2 requires /FirstChar, /LastChar, and /Widths on
+        // simple TrueType fonts. Without them, CoreGraphics logs
+        // "missing or invalid 'FirstChar' entry" and guesses glyph widths
+        // (visibly wrong letter spacing), and strict CUPS/driver PDF->PS
+        // filters drop the text run entirely, producing blank printed pages.
+        let mut page = perfect_print_core::page::Page::new(PageSize::Letter);
+        page.add(DrawCommand::Text {
+            run: perfect_print_core::draw::TextRun {
+                text: "Hi".to_string(),
+                glyphs: vec![],
+                style: perfect_print_core::draw::TextStyle::new(
+                    perfect_print_core::font::FontRef::new("Helvetica"),
+                    12.0,
+                ),
+            },
+            position: perfect_print_core::units::Point::new(72.0, 72.0),
+            max_width: None,
+        });
+
+        let model = DocumentBuilder::new().add_page(page).build().unwrap();
+
+        let renderer = PdfRenderer::new();
+        let bytes = renderer.render_to_bytes(&model).unwrap();
+
+        let pdf = lopdf::Document::load_mem(&bytes).unwrap();
+
+        // Find the embedded TrueType font dictionary.
+        let mut found_font = false;
+        for (_, obj) in pdf.objects.iter() {
+            if let lopdf::Object::Dictionary(dict) = obj {
+                let is_truetype_font = dict
+                    .get(b"Type")
+                    .and_then(|o| o.as_name())
+                    .map(|n| n == b"Font")
+                    .unwrap_or(false)
+                    && dict
+                        .get(b"Subtype")
+                        .and_then(|o| o.as_name())
+                        .map(|n| n == b"TrueType")
+                        .unwrap_or(false);
+                if !is_truetype_font {
+                    continue;
+                }
+                found_font = true;
+
+                let first_char = dict
+                    .get(b"FirstChar")
+                    .expect("FirstChar must be present")
+                    .as_i64()
+                    .expect("FirstChar must be an integer");
+                let last_char = dict
+                    .get(b"LastChar")
+                    .expect("LastChar must be present")
+                    .as_i64()
+                    .expect("LastChar must be an integer");
+                assert!(
+                    first_char >= 0 && first_char < last_char,
+                    "FirstChar/LastChar must be a sane ascending range, got {}..={}",
+                    first_char,
+                    last_char
+                );
+
+                let widths = dict
+                    .get(b"Widths")
+                    .expect("Widths must be present")
+                    .as_array()
+                    .expect("Widths must be an array");
+                assert_eq!(
+                    widths.len() as i64,
+                    last_char - first_char + 1,
+                    "Widths array must have one entry per code in FirstChar..=LastChar"
+                );
+
+                // Verify the width for 'H' (0x48) matches the ttf-parser
+                // advance for that glyph, scaled to 1000 units/em, within
+                // rounding tolerance.
+                let font_loader = perfect_print_layout::font_loader::SystemFontLoader::new();
+                let props = perfect_print_layout::font_loader::FontProperties::new("Helvetica");
+                let (font_data, face_index) = font_loader
+                    .get_font_data_for(&props)
+                    .expect("Helvetica font data should be available on macOS test hosts");
+                let face = ttf_parser::Face::parse(&font_data, face_index).unwrap();
+                let glyph_id = face.glyph_index('H').expect("face should have glyph 'H'");
+                let expected_width = (face.glyph_hor_advance(glyph_id).unwrap() as f64
+                    * 1000.0
+                    / face.units_per_em() as f64)
+                    .round() as i64;
+
+                let h_index = ('H' as i64) - first_char;
+                assert!(h_index >= 0 && (h_index as usize) < widths.len());
+                let actual_width = widths[h_index as usize]
+                    .as_i64()
+                    .or_else(|_| widths[h_index as usize].as_float().map(|f| f as i64))
+                    .expect("width entry must be numeric");
+
+                assert!(
+                    (actual_width - expected_width).abs() <= 1,
+                    "width for 'H' should match ttf-parser advance (±1): got {}, expected {}",
+                    actual_width,
+                    expected_width
+                );
+            }
+        }
+
+        assert!(found_font, "PDF should contain a TrueType font dictionary");
     }
 }
