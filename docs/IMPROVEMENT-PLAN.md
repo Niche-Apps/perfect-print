@@ -253,3 +253,54 @@ New crate: `perfect-print-html` (`scraper`, `ego-tree`, `url` deps). New docs:
   Helvetica.ttc-backed document: output PDF shrank from 7,112,685 bytes to
   1,534,755 bytes for the same content, with `pdffonts` still reporting all
   three faces (Regular/Bold/Italic) as embedded (`emb yes`).
+
+## 2026-07-21: PlainBooks blank-page print fix (two root causes)
+
+Two independent bugs, together the root cause of PlainBooks invoices
+printing as blank pages on macOS. Fixed on `fix/print-blank-pages`.
+
+- **PDF font dictionaries were spec-invalid (missing `/FirstChar`,
+  `/LastChar`, `/Widths`).** ISO 32000-1 §9.6.2 requires all three on a
+  simple TrueType font dictionary; `pdf_embedded_font` in
+  `crates/perfect-print-pdf/src/lib.rs` wrote none of them. CoreGraphics logs
+  `missing or invalid 'FirstChar' entry` (`CG_PDF_VERBOSE=1`) and falls back
+  to guessing widths from the embedded font program; strict CUPS/driver
+  PDF→PostScript filters in real print pipelines go further and drop the
+  offending text run entirely, producing blank pages. `embed_truetype_font`
+  now computes a `/Widths` array (1000-units-per-em) for the full WinAnsi
+  32..=255 code range from the same `ttf_parser::Face` used for
+  `/FontFile2` (mapping each WinAnsi code to Unicode via a table — the
+  0x80-0x9F block is CP1252, not Latin-1 — then to a glyph advance, 0 for
+  unmapped/missing glyphs), and `pdf_embedded_font` writes `/FirstChar 32
+  /LastChar 255 /Widths [...]`; `FontDescriptor` also gets `/MissingWidth
+  0`. Fixing this exposed a second, previously-masked bug in
+  `build_tj_array`'s `TJ`-array adjustment math (it assumed every glyph's
+  reader-applied default advance was 0, and used the *next* character's
+  shaped advance instead of the *previous* one's) — both are fixed together
+  since a correct per-glyph `TJ` adjustment requires `declared_width -
+  shaped_advance`. New regression test
+  `tests::pdf_font_dict_has_valid_widths_array` renders "Hi", parses the
+  output PDF, and asserts the dictionary and width values are correct.
+- **macOS print view double-applied the imageable-area offset, clipping
+  content.** `PerfectPrintPDFView drawRect:` in
+  `crates/perfect-print-backend-macos/src/native_print.m` manually
+  translated by `NSMinX(imageable) + (NSWidth(imageable) - renderedWidth) /
+  2.0` (and the y equivalent) — but AppKit already maps the rect
+  `rectForPage:` returns onto the paper's imageable area itself, including
+  `horizontallyCentered`/`verticallyCentered` placement, before calling
+  `drawRect:`. The result was two stacked offsets; with Letter media on A4
+  paper at Custom(1.0) scale this translated content to x ≈ −8.4pt,
+  clipping the left ~8pt of every printed page (first character partially
+  cut off). `rectForPage:` and `drawRect:` now share one `scaleForMedia:`
+  helper so their scale factors can't drift, `drawRect:` only scales the CTM
+  and translates the PDF's own MediaBox origin to view-space (0,0) — no
+  imageable-origin translation, no centering math, since AppKit already
+  applies both. The view's init-time frame is now sized conservatively (max
+  media size across all pages, times `max(1.0, custom_scale)` for Custom
+  mode) so every `rectForPage:` rect fits within the view's bounds as
+  AppKit requires. Verified hermetically (no printer/dialog) with an
+  `NSPrintOperation` + `NSPrintSaveJob` harness reproducing the view
+  verbatim: before the fix, mode 3 (Custom, scale 1.0) with Letter media on
+  A4 paper translated content by `(-8.4, +24.9)`pt; after the fix the
+  translate term is gone entirely and rasterized output shows no clipping
+  at any edge across modes 0 (FitToPage), 2 (None), and 3 (Custom).
