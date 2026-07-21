@@ -501,10 +501,21 @@ impl FlowLayoutEngine {
             let mut page = Page::new(page_size);
             page.margins = self.config.margins;
 
+            // `layout()` positions everything in content-area-relative
+            // coordinates (x/y start at 0 inside the margins). Neither the
+            // raster nor the PDF backend applies page margins itself, so the
+            // canonical `DocumentModel` must carry page-absolute coordinates
+            // here — translate every command by (margins.left, margins.top).
+            // `ContentBlock::Commands` blocks (e.g. the HTML `<hr>` rule) are
+            // authored in that same content-relative space, not already
+            // page-absolute, so they're translated identically; see
+            // `test_commands_block_is_offset_by_margins`.
             let mut layer = Layer::foreground();
             for block in page_blocks {
                 for cmd in &block.commands {
-                    layer.commands.push(cmd.clone());
+                    layer.commands.push(
+                        cmd.translated(self.config.margins.left, self.config.margins.top),
+                    );
                 }
             }
             page.layers.push(layer);
@@ -679,6 +690,119 @@ mod tests {
 
     fn test_style() -> TextStyle {
         TextStyle::new(FontRef::new("Helvetica"), 12.0)
+    }
+
+    /// `FlowLayoutEngine::layout()` internally lays out content starting at
+    /// (0,0) in content-area-relative coordinates. `build_document()` must
+    /// translate every emitted `DrawCommand` by the configured margins so the
+    /// canonical `DocumentModel` holds page-absolute coordinates — neither
+    /// the raster nor the PDF backend applies margins itself.
+    #[test]
+    fn test_layout_offsets_content_by_margins() {
+        let config = FlowConfig {
+            page_size: PageSize::Letter,
+            margins: Margins::all(72.0),
+            ..Default::default()
+        };
+
+        let mut engine = FlowLayoutEngine::new(config);
+        let blocks = vec![ContentBlock::paragraph("Hello World", test_style())];
+        let doc = engine.layout(&blocks);
+
+        let position = doc
+            .pages
+            .iter()
+            .flat_map(|p| p.layers.iter())
+            .flat_map(|l| l.commands.iter())
+            .find_map(|c| match c {
+                DrawCommand::Text { position, .. } => Some(*position),
+                _ => None,
+            })
+            .expect("expected a text run");
+
+        assert!(
+            position.x >= 72.0,
+            "text x should be offset by the left margin, got {}",
+            position.x
+        );
+        assert!(
+            position.y >= 72.0,
+            "text y should be offset by the top margin, got {}",
+            position.y
+        );
+    }
+
+    /// With zero margins, content-area-relative and page-absolute coordinates
+    /// coincide, so content should still start at the page origin.
+    #[test]
+    fn test_zero_margins_content_at_origin() {
+        let config = FlowConfig {
+            page_size: PageSize::Letter,
+            margins: Margins::all(0.0),
+            ..Default::default()
+        };
+
+        let mut engine = FlowLayoutEngine::new(config);
+        let blocks = vec![ContentBlock::paragraph("Hello World", test_style())];
+        let doc = engine.layout(&blocks);
+
+        let position = doc
+            .pages
+            .iter()
+            .flat_map(|p| p.layers.iter())
+            .flat_map(|l| l.commands.iter())
+            .find_map(|c| match c {
+                DrawCommand::Text { position, .. } => Some(*position),
+                _ => None,
+            })
+            .expect("expected a text run");
+
+        assert_eq!(
+            position.x, 0.0,
+            "with zero margins, x should be unchanged from content-relative"
+        );
+        // y additionally carries the line's baseline offset even at y=0 margin,
+        // so just check it's not additionally offset by a margin (it would be
+        // >= 72.0 if the default margin were mistakenly applied).
+        assert!(
+            position.y < 72.0,
+            "with zero margins, y should not carry a leftover default margin offset, got {}",
+            position.y
+        );
+    }
+
+    /// A `ContentBlock::Commands` block (e.g. the HTML `<hr>` rule) is
+    /// authored in the same content-area-relative coordinate space as every
+    /// other block — not already page-absolute — so it must be translated by
+    /// the margins too, exactly like text/table content.
+    #[test]
+    fn test_commands_block_is_offset_by_margins() {
+        let config = FlowConfig {
+            page_size: PageSize::Letter,
+            margins: Margins::all(72.0),
+            ..Default::default()
+        };
+
+        let mut engine = FlowLayoutEngine::new(config);
+        let blocks = vec![ContentBlock::Commands(vec![DrawCommand::FillRect {
+            rect: perfect_print_core::units::Rect::new(0.0, 0.0, 100.0, 1.0),
+            color: Color::black(),
+        }])];
+        let doc = engine.layout(&blocks);
+
+        let rect = doc
+            .pages
+            .iter()
+            .flat_map(|p| p.layers.iter())
+            .flat_map(|l| l.commands.iter())
+            .find_map(|c| match c {
+                DrawCommand::FillRect { rect, .. } => Some(*rect),
+                _ => None,
+            })
+            .expect("expected a FillRect command");
+
+        assert_eq!(rect.x, 72.0, "Commands block x should be offset by margin");
+        assert_eq!(rect.y, 72.0, "Commands block y should be offset by margin");
     }
 
     #[test]

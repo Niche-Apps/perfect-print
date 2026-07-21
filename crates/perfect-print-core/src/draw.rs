@@ -155,6 +155,26 @@ pub enum PathOp {
     Close,
 }
 
+impl PathOp {
+    /// Return this path operation with every point shifted by `(dx, dy)`.
+    pub fn translated(&self, dx: f64, dy: f64) -> Self {
+        match self {
+            PathOp::MoveTo(p) => PathOp::MoveTo(p.translated(dx, dy)),
+            PathOp::LineTo(p) => PathOp::LineTo(p.translated(dx, dy)),
+            PathOp::CurveTo { cp1, cp2, end } => PathOp::CurveTo {
+                cp1: cp1.translated(dx, dy),
+                cp2: cp2.translated(dx, dy),
+                end: end.translated(dx, dy),
+            },
+            PathOp::QuadTo { cp, end } => PathOp::QuadTo {
+                cp: cp.translated(dx, dy),
+                end: end.translated(dx, dy),
+            },
+            PathOp::Close => PathOp::Close,
+        }
+    }
+}
+
 /// Draw commands - the canonical rendering instructions.
 ///
 /// This enum represents ALL rendering operations. Every backend (PDF, raster,
@@ -239,6 +259,113 @@ pub enum DrawCommand {
 }
 
 impl DrawCommand {
+    /// Return this command with all of its position/geometry data shifted by
+    /// `(dx, dy)`. Used by `FlowLayoutEngine` to convert content-area-relative
+    /// coordinates (everything starts at (0,0) inside the page's margins)
+    /// into the page-absolute coordinates the canonical `DocumentModel`
+    /// stores, so every backend (PDF, raster, preview) can consume commands
+    /// directly without separately re-applying page margins.
+    ///
+    /// Every variant that carries page-space geometry is translated:
+    /// - `Image::source_rect` is intentionally left untouched — it addresses
+    ///   pixels within the source image, not a position on the page.
+    /// - `PushTransform` shifts only the transform's translation component
+    ///   (`e`, `f`); the rotation/scale part is unaffected, since we're
+    ///   moving where the transformed content starts, not how it's shaped.
+    /// - `Block`'s nested `commands` are translated recursively: they share
+    ///   the same page-space coordinate frame as everything else emitted by
+    ///   the flow engine (see `TableEngine`, which positions cell content
+    ///   directly in flow coordinates, not relative to the cell rect).
+    pub fn translated(&self, dx: f64, dy: f64) -> Self {
+        match self {
+            DrawCommand::Text {
+                run,
+                position,
+                max_width,
+            } => DrawCommand::Text {
+                run: run.clone(),
+                position: position.translated(dx, dy),
+                max_width: *max_width,
+            },
+            DrawCommand::FillRect { rect, color } => DrawCommand::FillRect {
+                rect: rect.translated(dx, dy),
+                color: *color,
+            },
+            DrawCommand::StrokeRect {
+                rect,
+                color,
+                width,
+                line_cap,
+                line_join,
+            } => DrawCommand::StrokeRect {
+                rect: rect.translated(dx, dy),
+                color: *color,
+                width: *width,
+                line_cap: *line_cap,
+                line_join: *line_join,
+            },
+            DrawCommand::FillPath {
+                ops,
+                fill_rule,
+                color,
+            } => DrawCommand::FillPath {
+                ops: ops.iter().map(|op| op.translated(dx, dy)).collect(),
+                fill_rule: *fill_rule,
+                color: *color,
+            },
+            DrawCommand::StrokePath {
+                ops,
+                width,
+                line_cap,
+                line_join,
+                miter_limit,
+                color,
+            } => DrawCommand::StrokePath {
+                ops: ops.iter().map(|op| op.translated(dx, dy)).collect(),
+                width: *width,
+                line_cap: *line_cap,
+                line_join: *line_join,
+                miter_limit: *miter_limit,
+                color: *color,
+            },
+            DrawCommand::Image {
+                image_id,
+                dest_rect,
+                source_rect,
+            } => DrawCommand::Image {
+                image_id: image_id.clone(),
+                dest_rect: dest_rect.translated(dx, dy),
+                // Source rect addresses the source image, not the page.
+                source_rect: *source_rect,
+            },
+            DrawCommand::PushClip { rect } => DrawCommand::PushClip {
+                rect: rect.translated(dx, dy),
+            },
+            DrawCommand::PopClip => DrawCommand::PopClip,
+            DrawCommand::PushTransform { transform } => DrawCommand::PushTransform {
+                transform: Transform {
+                    e: transform.e + dx,
+                    f: transform.f + dy,
+                    ..*transform
+                },
+            },
+            DrawCommand::PopTransform => DrawCommand::PopTransform,
+            DrawCommand::PushOpacity { opacity } => DrawCommand::PushOpacity { opacity: *opacity },
+            DrawCommand::PopOpacity => DrawCommand::PopOpacity,
+            DrawCommand::BeginGroup { name } => DrawCommand::BeginGroup { name: name.clone() },
+            DrawCommand::EndGroup => DrawCommand::EndGroup,
+            DrawCommand::Block { rect, commands } => DrawCommand::Block {
+                rect: rect.translated(dx, dy),
+                commands: Box::new(
+                    commands
+                        .iter()
+                        .map(|cmd| cmd.translated(dx, dy))
+                        .collect(),
+                ),
+            },
+        }
+    }
+
     /// Get the bounding box of this command, if computable.
     pub fn bounds(&self) -> Option<Rect> {
         match self {

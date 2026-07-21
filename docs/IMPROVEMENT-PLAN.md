@@ -213,3 +213,21 @@ Implemented per `docs/superpowers/plans/2026-07-21-html-css-compatibility.md`.
 
 New crate: `perfect-print-html` (`scraper`, `ego-tree`, `url` deps). New docs:
 `docs/html-css-support.md`. New fuzz target: `fuzz/fuzz_targets/fuzz_html_convert.rs`.
+
+- **Page margins bug fix**: `FlowLayoutEngine` laid out every block in
+  content-area-relative coordinates (x/y start at 0 inside the margins), but
+  `build_document()` only stored `page.margins` as metadata — neither the
+  raster renderer nor the PDF backend ever read it, so every flow-laid-out
+  document (including all HTML/`@page { margin: ... }` output) rendered flush
+  against the top-left page corner regardless of configured margins.
+  `build_document()` now translates every emitted `DrawCommand` (added
+  `DrawCommand::translated()`/`Point::translated()`/`Rect::translated()`/
+  `PathOp::translated()` in `perfect-print-core`) by `(margins.left,
+  margins.top)`, so the canonical `DocumentModel` carries page-absolute
+  coordinates that every backend can consume directly.
+  `ContentBlock::Commands` blocks (e.g. the HTML `<hr>` rule in
+  `perfect-print-html::convert`) are authored in the same content-relative
+  space as everything else, so they're translated identically — verified by
+  `test_commands_block_is_offset_by_margins` alongside
+  `test_layout_offsets_content_by_margins` and
+  `test_zero_margins_content_at_origin` in `crates/perfect-print-layout/src/flow.rs`.
