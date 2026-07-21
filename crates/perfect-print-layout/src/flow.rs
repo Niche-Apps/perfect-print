@@ -71,6 +71,17 @@ pub enum ContentBlock {
     PageBreak,
     /// Vertical gap in points.
     Gap(f64),
+    /// Content laid out at a fixed position on the current page, outside the
+    /// normal flow (does not advance the flow cursor). Mirrors CSS
+    /// `position: absolute` with `left`/`top`/`width` resolved to points.
+    Positioned {
+        /// Offset from the content-area origin, in points.
+        x: f64,
+        y: f64,
+        /// Layout width for the inner content, in points.
+        width: f64,
+        blocks: Vec<ContentBlock>,
+    },
 }
 
 impl ContentBlock {
@@ -146,6 +157,24 @@ impl FlowLayoutEngine {
         let page_height = content_rect.height;
         let content_width = content_rect.width;
 
+        let all_pages = self.layout_into_pages(blocks, content_width, page_height);
+
+        // Build DocumentModel from laid-out pages
+        self.build_document(all_pages)
+    }
+
+    /// Lay out `blocks` into a sequence of pages, each `page_height` tall and
+    /// `content_width` wide. Shared by the top-level `layout()` (real page
+    /// height) and by `ContentBlock::Positioned` (page_height ==
+    /// `f64::INFINITY`, so paragraphs/tables never trigger a page break and
+    /// everything lands on a single synthetic "page" that the caller then
+    /// translates into place).
+    fn layout_into_pages(
+        &mut self,
+        blocks: &[ContentBlock],
+        content_width: f64,
+        page_height: f64,
+    ) -> Vec<Vec<PositionedBlock>> {
         // Lists are lowered into RichParagraphs (with a marker span and left
         // indent) before pagination, so the rest of the loop only has to
         // handle one "rich text" shape.
@@ -464,12 +493,43 @@ impl FlowLayoutEngine {
                         }
                     }
                 }
+                ContentBlock::Positioned {
+                    x,
+                    y,
+                    width,
+                    blocks: inner_blocks,
+                } => {
+                    // Lay the inner content out on its own, unbounded
+                    // "page" (page_height = INFINITY means the fits-on-page
+                    // branch of every arm above is always taken, so nothing
+                    // here ever triggers a page break). Content taller than
+                    // the remaining physical page simply overflows past the
+                    // page edge when rendered — this matches CSS
+                    // `position: absolute`, where an element is taken out of
+                    // flow and is not implicitly paginated or clipped.
+                    let inner_pages = self.layout_into_pages(inner_blocks, *width, f64::INFINITY);
+                    let inner_page = inner_pages.into_iter().next().unwrap_or_default();
+
+                    for block in inner_page {
+                        let commands: Vec<DrawCommand> = block
+                            .commands
+                            .iter()
+                            .map(|cmd| cmd.translated(*x, *y))
+                            .collect();
+                        all_pages[page_idx].push(PositionedBlock {
+                            y: y + block.y,
+                            commands,
+                            height: block.height,
+                        });
+                    }
+                    // Deliberately do not touch `current_y`: positioned
+                    // content is out of the normal flow.
+                }
                 _ => {}
             }
         }
 
-        // Build DocumentModel from laid-out pages
-        self.build_document(all_pages)
+        all_pages
     }
 
     fn build_document(&self, pages: Vec<Vec<PositionedBlock>>) -> DocumentModel {
@@ -1249,6 +1309,152 @@ mod tests {
         assert_eq!(run.style.font, default.font, "font should be inherited");
         assert_eq!(run.style.size, default.size, "size should be inherited");
         assert_eq!(run.style.color, default.color, "color should be inherited");
+    }
+
+    // ─── Positioned (CSS `position: absolute`) Tests ───────────────
+
+    #[test]
+    fn test_positioned_block_lands_at_its_own_coordinates() {
+        let config = FlowConfig {
+            page_size: PageSize::Letter,
+            margins: Margins::all(72.0),
+            ..Default::default()
+        };
+
+        let mut engine = FlowLayoutEngine::new(config);
+        let blocks = vec![ContentBlock::Positioned {
+            x: 100.0,
+            y: 200.0,
+            width: 216.0,
+            blocks: vec![ContentBlock::paragraph("Hi", test_style())],
+        }];
+        let doc = engine.layout(&blocks);
+
+        let position = doc
+            .pages
+            .iter()
+            .flat_map(|p| p.layers.iter())
+            .flat_map(|l| l.commands.iter())
+            .find_map(|c| match c {
+                DrawCommand::Text { position, .. } => Some(*position),
+                _ => None,
+            })
+            .expect("expected a text run");
+
+        // Page-absolute = margin + positioned offset (+ any intra-line
+        // baseline/indent offset, hence >=).
+        assert_eq!(
+            position.x, 72.0 + 100.0,
+            "positioned text x should be margin + x offset"
+        );
+        assert!(
+            position.y >= 72.0 + 200.0,
+            "positioned text y should be at least margin + y offset, got {}",
+            position.y
+        );
+    }
+
+    #[test]
+    fn test_positioned_block_does_not_move_the_flow_cursor() {
+        let config = FlowConfig {
+            page_size: PageSize::Letter,
+            margins: Margins::all(72.0),
+            ..Default::default()
+        };
+
+        // Baseline: a lone flow paragraph's y position.
+        let mut baseline_engine = FlowLayoutEngine::new(config.clone());
+        let baseline_doc =
+            baseline_engine.layout(&[ContentBlock::paragraph("Second", test_style())]);
+        let baseline_y = baseline_doc
+            .pages
+            .iter()
+            .flat_map(|p| p.layers.iter())
+            .flat_map(|l| l.commands.iter())
+            .find_map(|c| match c {
+                DrawCommand::Text { position, .. } => Some(position.y),
+                _ => None,
+            })
+            .expect("expected a text run");
+
+        // With a Positioned block first, the following normal paragraph
+        // should land at the exact same y as if the positioned block were
+        // absent — the flow cursor must be untouched.
+        let mut engine = FlowLayoutEngine::new(config);
+        let blocks = vec![
+            ContentBlock::Positioned {
+                x: 300.0,
+                y: 300.0,
+                width: 100.0,
+                blocks: vec![ContentBlock::paragraph(
+                    "Positioned content, possibly many lines of it",
+                    test_style(),
+                )],
+            },
+            ContentBlock::paragraph("Second", test_style()),
+        ];
+        let doc = engine.layout(&blocks);
+
+        let mut text_ys: Vec<f64> = doc
+            .pages
+            .iter()
+            .flat_map(|p| p.layers.iter())
+            .flat_map(|l| l.commands.iter())
+            .filter_map(|c| match c {
+                DrawCommand::Text { position, run, .. } if run.text.starts_with("Second") => {
+                    Some(position.y)
+                }
+                _ => None,
+            })
+            .collect();
+        let second_y = text_ys.pop().expect("expected the 'Second' paragraph");
+
+        assert_eq!(
+            second_y, baseline_y,
+            "flow cursor must be unaffected by a preceding Positioned block"
+        );
+    }
+
+    #[test]
+    fn test_two_positioned_blocks_both_render_on_one_page() {
+        let config = FlowConfig {
+            page_size: PageSize::Letter,
+            margins: Margins::all(72.0),
+            ..Default::default()
+        };
+
+        let mut engine = FlowLayoutEngine::new(config);
+        let blocks = vec![
+            ContentBlock::Positioned {
+                x: 50.0,
+                y: 50.0,
+                width: 150.0,
+                blocks: vec![ContentBlock::paragraph("First box", test_style())],
+            },
+            ContentBlock::Positioned {
+                x: 300.0,
+                y: 400.0,
+                width: 150.0,
+                blocks: vec![ContentBlock::paragraph("Second box", test_style())],
+            },
+        ];
+        let doc = engine.layout(&blocks);
+
+        assert_eq!(doc.page_count(), 1, "both positioned blocks share one page");
+
+        let texts: Vec<String> = doc
+            .pages
+            .iter()
+            .flat_map(|p| p.layers.iter())
+            .flat_map(|l| l.commands.iter())
+            .filter_map(|c| match c {
+                DrawCommand::Text { run, .. } => Some(run.text.clone()),
+                _ => None,
+            })
+            .collect();
+        let joined = texts.join(" ");
+        assert!(joined.contains("First"), "expected first box text, got {joined:?}");
+        assert!(joined.contains("Second"), "expected second box text, got {joined:?}");
     }
 
     // ─── Fuzz / Randomized Tests ────────────────────────────────────
