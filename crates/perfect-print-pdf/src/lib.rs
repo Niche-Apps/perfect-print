@@ -7,6 +7,8 @@ use perfect_print_core::page::LayerType;
 use std::path::Path;
 use thiserror::Error;
 
+mod sfnt;
+
 /// Error type for PDF operations.
 #[derive(Debug, Error)]
 pub enum PdfError {
@@ -576,10 +578,35 @@ fn embed_truetype_font(
         .map(|h| h as i64);
     let italic_angle = face.as_ref().map(|f| f.italic_angle()).unwrap_or(0.0);
 
-    // Create FontFile2 stream (raw TrueType data)
+    // PDF `/FontFile2` must contain a single sfnt font program, not a
+    // `ttcf` TrueType Collection. On macOS most system fonts (e.g.
+    // Helvetica) resolve to a `.ttc` with `face_index` selecting the
+    // desired weight/style; embedding the raw collection bytes would embed
+    // every face in the family and produce a stream strict PDF viewers
+    // can't render text from. Extract just the referenced face; fall back
+    // to the original bytes (previous, buggy-but-safe behavior) if
+    // extraction fails for any reason.
+    let embedded_bytes: std::borrow::Cow<[u8]> = if sfnt::is_ttc(font_data) {
+        match sfnt::extract_ttc_face(font_data, face_index) {
+            Some(extracted) => std::borrow::Cow::Owned(extracted),
+            None => {
+                log::warn!(
+                    "Failed to extract face {} from TrueType Collection for font '{}'; \
+                     embedding the full collection instead (bloated PDF)",
+                    face_index,
+                    font_name
+                );
+                std::borrow::Cow::Borrowed(font_data)
+            }
+        }
+    } else {
+        std::borrow::Cow::Borrowed(font_data)
+    };
+
+    // Create FontFile2 stream (single-face TrueType data)
     let mut font_file_dict = Dictionary::new();
-    font_file_dict.set("Length1", font_data.len() as i64);
-    let font_file_stream = Stream::new(font_file_dict, font_data.to_vec());
+    font_file_dict.set("Length1", embedded_bytes.len() as i64);
+    let font_file_stream = Stream::new(font_file_dict, embedded_bytes.into_owned());
     let font_file_id = pdf.add_object(Object::Stream(font_file_stream));
 
     // Create FontDescriptor
