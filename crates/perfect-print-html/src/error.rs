@@ -3,7 +3,7 @@ use std::fmt;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HtmlRenderStage {
     Validate,
-    CreateWebView,
+    Parse,
     Load,
     Fonts,
     Images,

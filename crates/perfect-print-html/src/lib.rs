@@ -1,9 +1,11 @@
+mod convert;
 mod css;
 mod error;
 mod policy;
 mod readiness;
 mod stylesheet;
 
+pub use convert::{convert, ConvertedDocument, LoadedImage, PageSetup};
 pub use error::{HtmlRenderError, HtmlRenderStage};
 pub use policy::ResourcePolicy;
 pub use readiness::ReadinessTracker;
