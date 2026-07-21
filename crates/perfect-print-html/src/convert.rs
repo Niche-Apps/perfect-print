@@ -117,7 +117,7 @@ fn resolve_page_setup(sheet: &Stylesheet, doc: &HtmlDocument) -> PageSetup {
             setup.size = size_spec.to_page_size();
         }
         if let Some(margin) = rule.margin {
-            setup.margins = Margins::all(margin);
+            setup.margins = margin;
         }
     }
 

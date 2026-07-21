@@ -462,3 +462,39 @@ Fixed (TDD, failing tests written first):
 - `docs/html-css-support.md`: `white-space` added to the supported CSS
   properties list, with a new `## white-space` section documenting the
   `pre-wrap`≈`pre-line` simplification.
+
+## 2026-07-21: `@page` margin shorthand (per-side margins)
+
+Root cause (found while fixing PlainBooks print margins): `@page { margin:
+... }` only ever accepted a single length via `parse_length`, mapped onto
+`Margins::all(margin)` — a bare number, never CSS's 1/2/3/4-value margin
+shorthand or the `margin-top`/etc. longhands. PlainBooks' native-print HTML
+path wanted to emit its per-side template margins (default 0.5in each, but
+independently configurable) into `@page`, and a 4-value shorthand would have
+silently failed to parse (the whole multi-token string doesn't match any
+single unit suffix), falling back to `PageSetup::default()`'s 1-inch
+`Margins::all(72.0)` — a different, wrong margin, not the zero margin
+PlainBooks previously had, but still not what the template specified.
+
+Fixed:
+
+- **`stylesheet.rs::PageRule.margin`** changed from `Option<f64>` to
+  `Option<perfect_print_core::page::Margins>`.
+- **`parse_margin_shorthand`** (new, `stylesheet.rs`) parses the standard
+  CSS 1/2/3/4-value `margin` shorthand (each token run through the existing
+  `parse_length`), mirroring `margin: top right bottom left` semantics
+  (2-value = vertical/horizontal, 3-value = top/horizontal/bottom).
+- **`margin-top`/`margin-right`/`margin-bottom`/`margin-left`** are now
+  parsed as individual `@page` properties too (previously fell into the
+  generic `unsupported @page property` warning), cascading over a preceding
+  `margin` shorthand so a longhand after the shorthand overrides just that
+  side — normal CSS cascade behavior.
+- **`convert.rs::resolve_page_setup`** now assigns `rule.margin` directly
+  onto `PageSetup.margins` (previously wrapped it in `Margins::all`).
+- **Tests** (`stylesheet.rs`): the existing `at_page_rule_extracted` test
+  updated for the new `Option<Margins>` type; two new tests cover the
+  2/3/4-value shorthand forms and a longhand (`margin-left`) overriding one
+  side of a preceding shorthand. `cargo test -p perfect-print-html` and
+  `cargo test --workspace` both green.
+- `docs/html-css-support.md`'s `@page` entry rewritten to document the
+  shorthand forms and longhand cascade.

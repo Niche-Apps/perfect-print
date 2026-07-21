@@ -5,9 +5,28 @@
 //! recorded as warnings rather than causing a hard failure.
 
 use perfect_print_core::color::Color;
-use perfect_print_core::page::PageSize;
+use perfect_print_core::page::{Margins, PageSize};
 
 use crate::css::{parse_declarations, parse_length, Declaration};
+
+/// Parse a CSS `margin`-shorthand value into `Margins`, supporting the
+/// standard 1/2/3/4-value forms (`margin: 0.5in`, `margin: 1in 0.5in`,
+/// `margin: 1in 0.5in 0.75in`, `margin: 1in 0.5in 0.75in 0.25in`), each
+/// token parsed with [`parse_length`]. Returns `None` if any token fails to
+/// parse (e.g. a `%` or unrecognized unit) or the token count isn't 1-4.
+fn parse_margin_shorthand(value: &str) -> Option<Margins> {
+    let tokens: Vec<f64> = value
+        .split_whitespace()
+        .map(|tok| parse_length(tok, 12.0))
+        .collect::<Option<Vec<f64>>>()?;
+    match tokens.as_slice() {
+        [all] => Some(Margins::all(*all)),
+        [vertical, horizontal] => Some(Margins::symmetric(*vertical, *horizontal)),
+        [top, horizontal, bottom] => Some(Margins::new(*top, *horizontal, *bottom, *horizontal)),
+        [top, right, bottom, left] => Some(Margins::new(*top, *right, *bottom, *left)),
+        _ => None,
+    }
+}
 
 /// A single compound selector: `tag`, `.class`, `#id`, or `tag.class`.
 #[derive(Debug, Clone, PartialEq, Default)]
@@ -138,7 +157,11 @@ impl PageSizeSpec {
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct PageRule {
     pub size: Option<PageSizeSpec>,
-    pub margin: Option<f64>,
+    /// From the `margin` shorthand (1/2/3/4-value CSS form) and/or the
+    /// individual `margin-top`/`margin-right`/`margin-bottom`/`margin-left`
+    /// longhands, cascaded in source order (a longhand after the shorthand
+    /// overrides just that side, matching normal CSS cascade behavior).
+    pub margin: Option<Margins>,
 }
 
 #[derive(Debug, Clone)]
@@ -218,7 +241,30 @@ impl Stylesheet {
                     for d in &decls {
                         match d.property.as_str() {
                             "size" => rule.size = PageSizeSpec::parse(&d.value),
-                            "margin" => rule.margin = parse_length(&d.value, 12.0),
+                            "margin" => match parse_margin_shorthand(&d.value) {
+                                Some(m) => rule.margin = Some(m),
+                                None => warnings
+                                    .push(format!("unsupported @page margin: {}", d.value)),
+                            },
+                            "margin-top" | "margin-right" | "margin-bottom" | "margin-left" => {
+                                match parse_length(&d.value, 12.0) {
+                                    Some(v) => {
+                                        let mut m = rule.margin.unwrap_or_default();
+                                        match d.property.as_str() {
+                                            "margin-top" => m.top = v,
+                                            "margin-right" => m.right = v,
+                                            "margin-bottom" => m.bottom = v,
+                                            "margin-left" => m.left = v,
+                                            _ => unreachable!(),
+                                        }
+                                        rule.margin = Some(m);
+                                    }
+                                    None => warnings.push(format!(
+                                        "unsupported @page {}: {}",
+                                        d.property, d.value
+                                    )),
+                                }
+                            }
                             _ => {
                                 warnings.push(format!("unsupported @page property: {}", d.property))
                             }
@@ -355,7 +401,40 @@ mod tests {
             sheet.page_rule.as_ref().unwrap().size,
             Some(PageSizeSpec::A4)
         );
-        assert_eq!(sheet.page_rule.as_ref().unwrap().margin, Some(36.0));
+        assert_eq!(
+            sheet.page_rule.as_ref().unwrap().margin,
+            Some(Margins::all(36.0))
+        );
+    }
+
+    #[test]
+    fn at_page_margin_shorthand_supports_2_3_and_4_value_forms() {
+        let sheet = Stylesheet::parse("@page { margin: 10pt 20pt }");
+        assert_eq!(
+            sheet.page_rule.as_ref().unwrap().margin,
+            Some(Margins::new(10.0, 20.0, 10.0, 20.0))
+        );
+
+        let sheet = Stylesheet::parse("@page { margin: 10pt 20pt 30pt }");
+        assert_eq!(
+            sheet.page_rule.as_ref().unwrap().margin,
+            Some(Margins::new(10.0, 20.0, 30.0, 20.0))
+        );
+
+        let sheet = Stylesheet::parse("@page { margin: 10pt 20pt 30pt 40pt }");
+        assert_eq!(
+            sheet.page_rule.as_ref().unwrap().margin,
+            Some(Margins::new(10.0, 20.0, 30.0, 40.0))
+        );
+    }
+
+    #[test]
+    fn at_page_margin_longhands_override_individual_sides() {
+        let sheet = Stylesheet::parse("@page { margin: 36pt; margin-left: 100pt }");
+        assert_eq!(
+            sheet.page_rule.as_ref().unwrap().margin,
+            Some(Margins::new(36.0, 36.0, 36.0, 100.0))
+        );
     }
 
     #[test]

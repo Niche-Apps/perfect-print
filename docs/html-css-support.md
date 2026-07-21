@@ -127,8 +127,15 @@ Specificity: `id` (100) > `class` (10) > `tag` (1); a later rule wins ties.
 Inline `style=""` beats all selector-based rules.
 
 **`@page`:** `@page { size: ...; margin: ... }` — `size` accepts
-`letter|a4|legal|<width> <height>`; margin lengths map onto the resolved
-`PageSetup`'s margins.
+`letter|a4|legal|<width> <height>`; `margin` accepts the standard CSS
+shorthand forms (1 value = all sides, 2 = vertical/horizontal, 3 =
+top/horizontal/bottom, 4 = top/right/bottom/left), and the individual
+`margin-top`/`margin-right`/`margin-bottom`/`margin-left` longhands are also
+accepted and cascade over a preceding shorthand (matching normal CSS
+cascade — a longhand after the shorthand overrides just that one side).
+Whichever combination resolves wins onto the `PageSetup`'s `Margins {top,
+right, bottom, left}`, so a template's asymmetric per-side margins carry
+through to the printed page rather than being flattened to a single value.
 
 **Default user-agent stylesheet** (hard-coded, applied before any document
 `<style>`/inline styles):
