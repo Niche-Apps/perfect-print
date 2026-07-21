@@ -107,15 +107,11 @@ fn extract_title(html: &Html) -> Option<String> {
     }
 }
 
+/// Precedence: caller's explicit `page_settings()` > document `@page` >
+/// letter default.
 fn resolve_page_setup(sheet: &Stylesheet, doc: &HtmlDocument) -> PageSetup {
-    let page_settings = doc.page();
-    let mut setup = PageSetup {
-        size: PageSize::Custom {
-            width: page_settings.width_points,
-            height: page_settings.height_points,
-        },
-        margins: Margins::all(72.0),
-    };
+    let mut setup = PageSetup::default();
+
     if let Some(rule) = &sheet.page_rule {
         if let Some(size_spec) = rule.size {
             setup.size = size_spec.to_page_size();
@@ -124,6 +120,14 @@ fn resolve_page_setup(sheet: &Stylesheet, doc: &HtmlDocument) -> PageSetup {
             setup.margins = Margins::all(margin);
         }
     }
+
+    if let Some(explicit) = doc.explicit_page_settings() {
+        setup.size = PageSize::Custom {
+            width: explicit.width_points,
+            height: explicit.height_points,
+        };
+    }
+
     setup
 }
 

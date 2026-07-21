@@ -2,7 +2,6 @@ use perfect_print_html::{
     HtmlDocument, HtmlPageSettings, HtmlRenderError, HtmlRenderStage, ReadinessTracker,
     ResourcePolicy,
 };
-use std::time::{Duration, Instant};
 
 #[test]
 fn html_document_rejects_empty_and_oversize_input() {
@@ -77,30 +76,18 @@ fn page_and_resource_limits_are_validated() {
 }
 
 #[test]
-fn readiness_requires_dom_fonts_and_images() {
-    let start = Instant::now();
-    let mut tracker = ReadinessTracker::new(start, Duration::from_secs(5));
-    assert_eq!(tracker.stage(), HtmlRenderStage::Load);
+fn readiness_tracks_parse_images_and_layout_in_order() {
+    let mut tracker = ReadinessTracker::new();
+    assert_eq!(tracker.stage(), HtmlRenderStage::Parse);
     assert!(!tracker.is_ready());
 
-    tracker.mark_dom_ready();
-    assert_eq!(tracker.stage(), HtmlRenderStage::Fonts);
-    tracker.mark_fonts_ready();
+    tracker.mark_parsed();
     assert_eq!(tracker.stage(), HtmlRenderStage::Images);
-    tracker.mark_images_ready();
-    assert!(tracker.is_ready());
+    tracker.mark_images_loaded();
     assert_eq!(tracker.stage(), HtmlRenderStage::RenderPdf);
-}
-
-#[test]
-fn readiness_timeout_has_a_stable_stage_error() {
-    let start = Instant::now();
-    let tracker = ReadinessTracker::new(start, Duration::from_millis(50));
-    let error = tracker
-        .check_timeout(start + Duration::from_millis(51))
-        .unwrap_err();
-    assert_eq!(error.code(), "HTML_LOAD_TIMEOUT");
-    assert_eq!(error.stage(), HtmlRenderStage::Load);
+    assert!(!tracker.is_ready());
+    tracker.mark_laid_out();
+    assert!(tracker.is_ready());
 }
 
 #[test]
