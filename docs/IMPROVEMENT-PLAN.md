@@ -169,8 +169,47 @@ Core build/test status should be verified with `cargo test --workspace`. Several
 - **Style inheritance**: `FlowConfig.default_style` (set via `Document::default_style()`) is merged into every `Paragraph` and `RichParagraph` (including each of its spans) via `merge_styles()` in `flow.rs`: unset fields (empty font, zero size, default black color, default left alignment) fall back to the document default; explicitly-set fields win. `test_paragraph_inherits_flow_default_style` and `test_rich_paragraph_inherits_flow_default_style` in `crates/perfect-print-layout/src/flow.rs` assert the merged font/size/color reach the rendered `DrawCommand::Text` runs, not just that layout succeeds.
 
 - Hyphenation (requires a hyphenation dictionary)
-- Fuzz testing (requires `cargo-fuzz` setup)
 - Windows/Linux backends (requires platform-specific work)
 - Tauri/egui/iced integrations (requires GUI framework knowledge)
 - Barcodes/QR codes (separate feature)
 - WASM target (requires `wasm32` testing)
+
+## 2026-07-21: HTML/CSS compatibility + rich text/list API
+
+Implemented per `docs/superpowers/plans/2026-07-21-html-css-compatibility.md`.
+
+- **Rich-text spans** (Task 1): `ContentBlock::RichParagraph` carries mixed-style
+  `StyledSpan`s (bold/italic/underline/strikethrough/color per span, sharing one
+  baseline per line); public `RichParagraph` builder in `perfect-print`.
+- **List blocks** (Task 2): `ContentBlock::List` (`ListKind::Bulleted`/`Numbered`,
+  nested `level`); public `List` builder (`List::bulleted()/numbered()`, `.item()`,
+  `.rich_item()`, `.nested()`).
+- **Style inheritance** (Task 3): already wired and verified — see item 6 above
+  (`FlowConfig.default_style` merges into `Paragraph`/`RichParagraph`).
+- **CSS subset parser** (`perfect-print-html::css`, `::stylesheet`, Task 4):
+  hand-rolled declaration/length/color parsing, selector cascade with
+  id > class > tag specificity, `@page` extraction.
+- **HTML/CSS pipeline** (`perfect-print-html::convert`, Task 5): `scraper`-based
+  DOM walk with cascade resolution, lowering into the same `ContentBlock`s the
+  native `Document` builder produces — no second rendering path.
+- **`HtmlDocument::render()`** (Task 6): validate → parse/cascade/convert → flow
+  layout → `DocumentModel`, with `HtmlRenderResult::to_pdf_bytes()`/`save_pdf()`/
+  `render_png()`. Page-setup precedence: explicit `page_settings()` >
+  `@page` > letter default. Title precedence: explicit `.title()` >
+  HTML `<title>`. `ReadinessTracker` was simplified from an async
+  load/timeout model (inherited from a WebView-era design) to a plain
+  stage tracker matching the synchronous pure-Rust pipeline.
+- **CLI `render-html` subcommand** (Task 7): `perfect-print-cli render-html
+  <input.html> [--pdf] [--png-dir] [--dpi] [--base-dir] [--strict]`.
+- **Bold/italic rendering bug fix** (found while verifying Task 7's demo
+  output): `TextStyle.bold`/`.italic` were never consulted when selecting a
+  font face for shaping (`perfect-print-layout`), rasterizing
+  (`perfect-print-render`), or embedding (`perfect-print-pdf`) — every run
+  used the regular face. `perfect-print-render`'s raster font cache also
+  discarded the font-collection face index from `fontdb` and always parsed
+  face 0 (Regular) of any TrueType Collection, which was the root cause once
+  the family/weight/style query itself was fixed. All three layers now
+  select/key by family + bold + italic.
+
+New crate: `perfect-print-html` (`scraper`, `ego-tree`, `url` deps). New docs:
+`docs/html-css-support.md`. New fuzz target: `fuzz/fuzz_targets/fuzz_html_convert.rs`.

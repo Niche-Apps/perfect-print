@@ -23,6 +23,9 @@ path = "../crates/perfect-print-pdf"
 [dependencies.perfect-print-barcode]
 path = "../crates/perfect-print-barcode"
 
+[dependencies.perfect-print-html]
+path = "../crates/perfect-print-html"
+
 [[bin]]
 name = "fuzz_document_model_json"
 path = "fuzz_targets/fuzz_document_model_json.rs"
@@ -47,6 +50,13 @@ bench = false
 [[bin]]
 name = "fuzz_barcode"
 path = "fuzz_targets/fuzz_barcode.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_html_convert"
+path = "fuzz_targets/fuzz_html_convert.rs"
 test = false
 doc = false
 bench = false

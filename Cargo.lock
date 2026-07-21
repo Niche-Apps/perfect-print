@@ -4991,6 +4991,7 @@ dependencies = [
  "libfuzzer-sys",
  "perfect-print-barcode",
  "perfect-print-core",
+ "perfect-print-html",
  "perfect-print-layout",
  "perfect-print-pdf",
  "serde_json",
