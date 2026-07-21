@@ -231,3 +231,25 @@ New crate: `perfect-print-html` (`scraper`, `ego-tree`, `url` deps). New docs:
   `test_commands_block_is_offset_by_margins` alongside
   `test_layout_offsets_content_by_margins` and
   `test_zero_margins_content_at_origin` in `crates/perfect-print-layout/src/flow.rs`.
+
+- **PDF font embedding: TrueType Collection gap closed.** `embed_truetype_font`
+  in `crates/perfect-print-pdf/src/lib.rs` used to write the *entire* raw
+  font-loader bytes into the `/FontFile2` stream. On macOS, `fontdb` usually
+  resolves system fonts (e.g. Helvetica) from a `.ttc` TrueType Collection
+  file, so the embedded stream was the whole multi-face collection rather
+  than the single face `/FontDescriptor` declared — bloating PDFs and
+  producing an embedded font program strict PDF viewers can't render text
+  from. The face index was already used correctly for metrics/outlines
+  (`font_loader.rs`, raster `FontCache`); only the embedded bytes were wrong.
+  New module `crates/perfect-print-pdf/src/sfnt.rs` adds
+  `extract_ttc_face(data, face_index)`, a pure, panic-free function that
+  detects the `ttcf` magic, parses the referenced face's sfnt offset table,
+  and rebuilds a standalone sfnt (table directory rewritten, tables 4-byte
+  aligned/zero-padded, per-table and whole-font checksums recomputed,
+  `head.checkSumAdjustment` recomputed per the OpenType spec). Non-TTC input
+  passes through unchanged; malformed/truncated TTCs fail gracefully
+  (`log::warn!` + fall back to embedding the original bytes) rather than
+  panicking. Verified end-to-end with `render-html` on a real
+  Helvetica.ttc-backed document: output PDF shrank from 7,112,685 bytes to
+  1,534,755 bytes for the same content, with `pdffonts` still reporting all
+  three faces (Regular/Bold/Italic) as embedded (`emb yes`).
