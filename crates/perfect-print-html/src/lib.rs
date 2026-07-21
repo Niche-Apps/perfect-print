@@ -1,10 +1,13 @@
+mod css;
 mod error;
 mod policy;
 mod readiness;
+mod stylesheet;
 
 pub use error::{HtmlRenderError, HtmlRenderStage};
 pub use policy::ResourcePolicy;
 pub use readiness::ReadinessTracker;
+pub use stylesheet::{resolve_color, PageRule, PageSizeSpec, SimpleSelector, Stylesheet};
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct HtmlPageSettings {

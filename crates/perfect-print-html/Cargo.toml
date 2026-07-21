@@ -9,6 +9,7 @@ repository.workspace = true
 description = "Browser-grade HTML/CSS rendering for Perfect Print"
 
 [dependencies]
+perfect-print-core = { path = "../perfect-print-core" }
 thiserror = { workspace = true }
 url = "2"
 
