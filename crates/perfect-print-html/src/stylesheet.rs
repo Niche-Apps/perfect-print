@@ -219,10 +219,9 @@ impl Stylesheet {
                         match d.property.as_str() {
                             "size" => rule.size = PageSizeSpec::parse(&d.value),
                             "margin" => rule.margin = parse_length(&d.value, 12.0),
-                            _ => warnings.push(format!(
-                                "unsupported @page property: {}",
-                                d.property
-                            )),
+                            _ => {
+                                warnings.push(format!("unsupported @page property: {}", d.property))
+                            }
                         }
                     }
                     page_rule = Some(rule);
@@ -335,8 +334,9 @@ mod tests {
 
     #[test]
     fn cascade_specificity_id_beats_class_beats_tag() {
-        let sheet =
-            Stylesheet::parse("p { color: #00ff00 } .warn { color: #ffff00 } #boss { color: #ff0000 }");
+        let sheet = Stylesheet::parse(
+            "p { color: #00ff00 } .warn { color: #ffff00 } #boss { color: #ff0000 }",
+        );
         let d = sheet.matching_declarations("p", &["warn".into()], Some("boss"));
         assert_eq!(resolve_color(&d), Some(Color::rgb(1.0, 0.0, 0.0)));
     }
@@ -351,7 +351,10 @@ mod tests {
     #[test]
     fn at_page_rule_extracted() {
         let sheet = Stylesheet::parse("@page { size: a4; margin: 36pt }");
-        assert_eq!(sheet.page_rule.as_ref().unwrap().size, Some(PageSizeSpec::A4));
+        assert_eq!(
+            sheet.page_rule.as_ref().unwrap().size,
+            Some(PageSizeSpec::A4)
+        );
         assert_eq!(sheet.page_rule.as_ref().unwrap().margin, Some(36.0));
     }
 
@@ -359,7 +362,13 @@ mod tests {
     fn at_page_rule_with_physical_units_resolves_to_points() {
         let sheet = Stylesheet::parse("@page { size: 8.5in 11in }");
         let size = sheet.page_rule.as_ref().unwrap().size.unwrap();
-        assert_eq!(size, PageSizeSpec::Custom { width: 612.0, height: 792.0 });
+        assert_eq!(
+            size,
+            PageSizeSpec::Custom {
+                width: 612.0,
+                height: 792.0
+            }
+        );
         let page_size = size.to_page_size();
         match page_size {
             PageSize::Custom { width, height } => {

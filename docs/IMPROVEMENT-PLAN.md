@@ -347,3 +347,63 @@ flow, ignoring its authored coordinates. Fixed on
   `adversarial_render_png_high_dpi` unrelated to this work) was recorded
   before any change; the final `cargo test --workspace` run after both
   features shows no new failures.
+
+### Follow-up (same day): image sizing inside `position: absolute` boxes
+
+Root cause: `position: absolute` shipped above gave templates working
+`left`/`top`/`width`, but `<img>` sizing (`convert.rs::emit_img`) never
+looked at CSS at all — it only read the (non-CSS) HTML `width`/`height`
+attributes, falling back to the image's natural pixel dimensions. PlainBooks
+invoice templates emit `<div style="position:absolute;...;width:Wpt;
+height:Hpt;overflow:hidden"><img style="width:100%;height:100%;
+object-fit:contain" src="data:image/png;base64,..."/></div>` — a `%` CSS
+size the old code couldn't parse, so it silently fell through to natural
+size. A multi-thousand-pixel logo then rendered far larger than its
+template box, opaque, covering every earlier-drawn element on the page (a
+real print artifact showed the extracted text was all present via
+`pdftotext`, but the raster showed only the giant logo — confirming a
+render-time layout bug, not a content-loss bug).
+
+Fixed (still `feature/absolute-positioning`'s follow-on work, merged to
+`main`):
+
+- **`height` is now a parsed property** (`apply_declarations`), stored on
+  `ElementProps::explicit_height` — previously it hit the
+  `unsupported CSS property` catch-all. Currently only acted on by
+  `position: absolute` containers, to establish a `BoxContext` (width +
+  optional height) for percentage resolution; on other elements it's parsed
+  (no warning) but has no layout effect yet, since block heights are
+  content-driven elsewhere in this renderer.
+- **`width`/`height` accept `%`** (`ElementProps::width_percent` /
+  `height_percent`), resolved only for `<img>`, only against the nearest
+  enclosing positioned container's `BoxContext`. No container, or a
+  container with unresolved height for a `%` height: falls through to the
+  next rule below rather than warning or panicking.
+- **`object-fit: contain` / `fill`** parsed (`ElementProps::object_fit`);
+  `fill` (the CSS default, and the fallback when unspecified) stretches to
+  the resolved box, `contain` scales the natural image to fit inside it
+  preserving aspect ratio.
+- **`Converter::emit_img` rewritten** as `resolve_image_size`, a strict
+  precedence chain: (1) CSS `width`/`height` (absolute or `%`, with
+  `object-fit` applied when both resolve, aspect-derived when only one
+  does), (2) legacy HTML `width`/`height` attributes, (3) — the actual bug
+  fix — no resolvable CSS size but inside a positioned container with a
+  known box: fit to the box (contain semantics, never upscaling) instead of
+  natural size, (4) no container either: cap at the remaining content
+  width, preserving aspect ratio. A print page can now never render an
+  image larger than its declared template slot, or, absent one, larger
+  than the page.
+- **Tests** (`crates/perfect-print-html/src/convert.rs`, TDD — written
+  failing first): a synthetic 20×10 PNG inside a 144×72pt positioned box
+  with `width:100%;height:100%;object-fit:contain` fits the box exactly
+  (matching aspect ratio); the same image with no CSS size at all inside a
+  50×50pt box is capped to the box, not rendered at its natural 20×10px;
+  `width:100%` with no enclosing positioned container falls back to the
+  content-width cap instead of panicking; a synthetic 2000×1000px image
+  with no styles anywhere is capped at the 468pt default content width,
+  aspect preserved. `cargo test -p perfect-print-html` and
+  `cargo test --workspace` both green (161 total across the workspace, no
+  regressions).
+- `docs/html-css-support.md` gained an "Image sizing" section documenting
+  the precedence chain, and `%`/`height`/`object-fit` are now listed as
+  supported properties.

@@ -170,10 +170,7 @@ impl HtmlDocument {
             "render() must complete every pipeline stage before returning"
         );
 
-        let title = self
-            .title_value()
-            .map(str::to_string)
-            .or(converted.title);
+        let title = self.title_value().map(str::to_string).or(converted.title);
         if let Some(title) = title {
             model.metadata.title = Some(title);
         }

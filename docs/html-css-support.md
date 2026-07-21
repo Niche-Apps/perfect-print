@@ -25,11 +25,14 @@ or `span` (inline context) by display default, with a warning.
 **CSS length units:** every property below that accepts a length accepts
 `pt` (default/bare-number unit), `px` (96dpi → points ×0.75), `em` (relative
 to the parent's resolved font size), `in` (×72), `cm` (×72/2.54), `mm`
-(×72/25.4), and `pc` (×12). `%` is parsed but not resolved (treated as
-unsupported, produces a warning). This applies uniformly to font sizes,
-margins, padding, letter-spacing, `@page { size: ... }`, and
-`left`/`top`/`width` on absolutely positioned elements — so a template
-authored entirely in inches (e.g. `@page { size: 8.5in 11in }`,
+(×72/25.4), and `pc` (×12). `%` is resolved only for `<img>` `width`/`height`
+(against the nearest `position: absolute` ancestor's box — see [image
+sizing](#image-sizing)); everywhere else `%` is parsed but not resolved
+(treated as unsupported, produces a warning). Non-percentage units apply
+uniformly to font sizes, margins, padding, letter-spacing,
+`@page { size: ... }`, and `left`/`top`/`width`/`height` on absolutely
+positioned elements — so a template authored entirely in inches (e.g.
+`@page { size: 8.5in 11in }`,
 `left: 0.5in`) resolves correctly without any pre-conversion.
 
 **CSS properties:**
@@ -52,6 +55,9 @@ authored entirely in inches (e.g. `@page { size: 8.5in 11in }`,
 - `position` (`absolute`, `relative`; see [`position: absolute`](#position-absolute) below — other values, e.g. `fixed`/`sticky`, are unsupported and warn)
 - `left`/`top` (any supported length unit; only meaningful together with `position: absolute`)
 - `width` on `position: absolute` elements (any supported length unit; sets the positioned box's layout/wrap width)
+- `height` on `position: absolute` elements (any supported length unit; establishes the positioned box's height for percentage resolution — see [image sizing](#image-sizing) below. On other elements `height` is parsed but has no layout effect since block heights are content-driven.)
+- `width`/`height` as a percentage (`%`) on an `<img>` — resolved against the nearest enclosing `position: absolute` container's box (see [image sizing](#image-sizing))
+- `object-fit` (`contain`, `fill`) on `<img>` (see [image sizing](#image-sizing))
 
 ## `position: absolute`
 
@@ -72,13 +78,17 @@ y, width, blocks }` instead of an ordinary block:
   content before and after it lays out exactly as if the positioned element
   were absent. This matches CSS's out-of-flow semantics for
   `position: absolute`.
+- **`height`** (any supported length unit) establishes the positioned box's
+  height, used only to resolve percentage `width`/`height` on descendant
+  `<img>` elements (see [image sizing](#image-sizing)) — it does not clip
+  or paginate the box's own content.
 - **Overflow is not clipped.** Content taller than the remaining space on
   the page is rendered past the page edge rather than being paginated or
   cropped — this matches real CSS `position: absolute` (which does not
   implicitly paginate an out-of-flow element), but it does mean a
   positioned box with `overflow: hidden` and more content than its `height`
-  will visibly overflow instead of being clipped; `height` and `overflow`
-  are still unsupported properties and produce a warning for this reason.
+  will visibly overflow instead of being clipped; `overflow` itself is
+  still an unsupported property and produces a warning.
 - `position: relative` is accepted as a **silent no-op for flow purposes**:
   the element stays in normal flow (open/close block, margins, walk its
   children normally) and does not itself establish a new coordinate origin,
@@ -111,6 +121,48 @@ Font family defaults to Helvetica, color to black. `blockquote` gets a 36pt
 left indent. `code` defaults to Courier. Margins between blocks default to
 0.5× the element's font-size (top and bottom); heading margins default to
 0.75×.
+
+## Image sizing
+
+`<img>` destination size in points is resolved in this precedence order —
+a print page must never render an image beyond its declared container, or,
+absent a container, beyond the page's content width:
+
+1. **CSS `width`/`height`.** Any supported absolute length, or `%`
+   (resolved against the nearest enclosing `position: absolute`
+   container's box — its CSS `width`/`height`; a `%` with no enclosing
+   positioned container, or against a container with no resolvable CSS
+   `height`, has nothing to resolve against and falls through to the next
+   rule). If only one of `width`/`height` resolves, the other is derived
+   preserving the image's natural aspect ratio. If both resolve:
+   - `object-fit: contain` scales the natural image to fit inside the
+     resolved `width`×`height` box, preserving aspect ratio (never
+     cropping, never distorting).
+   - Otherwise (the CSS default, `fill`, or `object-fit` unspecified) the
+     image is stretched to exactly `width`×`height`, matching real CSS
+     `object-fit: fill` semantics.
+2. **Legacy HTML `width`/`height` attributes** (not CSS), honored together
+   for backward compatibility, if CSS resolved neither dimension.
+3. **No resolvable CSS size, inside a positioned container with a known
+   box:** fit to the container's box (contain semantics, never upscaling
+   past natural size) rather than rendering at natural pixel size — this is
+   what prevents an oversized logo dropped into a template's image slot
+   from covering the rest of the page.
+4. **No resolvable CSS size, no positioned container:** capped at the
+   remaining content width (from the current indent to the content-area's
+   right edge), preserving aspect ratio, never upscaled past natural size.
+
+This is what makes `<div style="position:absolute;...;width:Wpt;height:Hpt;overflow:hidden"><img style="width:100%;height:100%;object-fit:contain" .../></div>`
+— the pattern PlainBooks' invoice templates emit — size correctly instead
+of falling through to the image's natural pixel dimensions (previously: a
+multi-thousand-pixel logo would render far larger than its template box,
+opaque, covering all earlier-drawn page content).
+
+`overflow` itself remains unsupported (see [`position:
+absolute`](#position-absolute) above) — sizing an image to fit its box
+makes `overflow: hidden` moot for the common "image fills its box" case,
+but a box with `overflow: hidden` and *other* content taller than its
+`height` will still visibly overflow rather than being clipped.
 
 ## Precedence rules
 

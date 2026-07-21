@@ -164,6 +164,15 @@ enum PositionMode {
     Relative,
 }
 
+/// CSS `object-fit` values we act on for `<img>` sizing. `Fill` (the CSS
+/// default) stretches to the resolved box, distorting aspect ratio if
+/// needed; `Contain` scales to fit inside the box, preserving aspect ratio.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ObjectFit {
+    Fill,
+    Contain,
+}
+
 /// Non-inherited per-element CSS effects (margins, breaks, table styling).
 #[derive(Debug, Clone, Default)]
 struct ElementProps {
@@ -177,6 +186,33 @@ struct ElementProps {
     left: Option<f64>,
     top: Option<f64>,
     explicit_width: Option<f64>,
+    explicit_height: Option<f64>,
+    /// `width: N%` — a fraction in `[0, ...]` (e.g. `1.0` for `100%`),
+    /// resolved against the nearest positioned-container box, if any.
+    width_percent: Option<f64>,
+    /// `height: N%`, same encoding as `width_percent`.
+    height_percent: Option<f64>,
+    object_fit: Option<ObjectFit>,
+}
+
+/// A percentage length like `"100%"` → `Some(1.0)`. Returns `None` for
+/// anything else (including unparseable numbers), leaving those to the
+/// absolute-length path.
+fn parse_percentage(value: &str) -> Option<f64> {
+    let value = value.trim();
+    let number = value.strip_suffix('%')?;
+    number.trim().parse::<f64>().ok().map(|n| n / 100.0)
+}
+
+/// The sizing box established by the nearest enclosing `position: absolute`
+/// container, used to resolve percentage `width`/`height` on descendants
+/// (chiefly `<img>`). `height` is `None` when the container has no
+/// resolvable CSS height (e.g. `height` wasn't set) — percentage heights
+/// then have nothing to resolve against.
+#[derive(Debug, Clone, Copy)]
+struct BoxContext {
+    width: f64,
+    height: Option<f64>,
 }
 
 fn parse_font_weight(value: &str) -> Option<bool> {
@@ -322,10 +358,34 @@ fn apply_declarations(
                 Some(t) => props.top = Some(t),
                 None => warnings.push(format!("unsupported top: {}", d.value)),
             },
-            "width" => match parse_length(&d.value, style.size) {
-                Some(w) => props.explicit_width = Some(w),
-                None => warnings.push(format!("unsupported width: {}", d.value)),
-            },
+            "width" => {
+                if let Some(pct) = parse_percentage(&d.value) {
+                    props.width_percent = Some(pct);
+                } else {
+                    match parse_length(&d.value, style.size) {
+                        Some(w) => props.explicit_width = Some(w),
+                        None => warnings.push(format!("unsupported width: {}", d.value)),
+                    }
+                }
+            }
+            "height" => {
+                if let Some(pct) = parse_percentage(&d.value) {
+                    props.height_percent = Some(pct);
+                } else {
+                    match parse_length(&d.value, style.size) {
+                        Some(h) => props.explicit_height = Some(h),
+                        None => warnings.push(format!("unsupported height: {}", d.value)),
+                    }
+                }
+            }
+            "object-fit" => {
+                let v = d.value.trim().to_ascii_lowercase();
+                match v.as_str() {
+                    "contain" => props.object_fit = Some(ObjectFit::Contain),
+                    "fill" => props.object_fit = Some(ObjectFit::Fill),
+                    _ => warnings.push(format!("unsupported object-fit: {}", d.value)),
+                }
+            }
             other => warnings.push(format!("unsupported CSS property: {other}")),
         }
     }
@@ -452,6 +512,10 @@ struct Converter {
     counter: usize,
     pending_gap: f64,
     has_content: bool,
+    /// Nearest enclosing `position: absolute` container's sizing box, used
+    /// to resolve percentage `width`/`height` on descendants (see
+    /// `BoxContext`). `None` outside any positioned container.
+    box_context: Option<BoxContext>,
 }
 
 impl Converter {
@@ -467,6 +531,7 @@ impl Converter {
             counter: 0,
             pending_gap: 0.0,
             has_content: false,
+            box_context: None,
         }
     }
 
@@ -551,7 +616,7 @@ impl Converter {
                 "head" => {}  // only <title> is used, extracted separately
                 "title" => {}
                 "hr" => self.emit_hr(style, indent),
-                "img" => self.emit_img(el),
+                "img" => self.emit_img(el, style),
                 "table" => self.emit_table(el, style),
                 "ul" => self.emit_list(el, ListKind::Bulleted, style, indent),
                 "ol" => self.emit_list(el, ListKind::Numbered, style, indent),
@@ -623,14 +688,20 @@ impl Converter {
         let saved_blocks = std::mem::take(&mut self.blocks);
         let saved_pending_gap = self.pending_gap;
         let saved_has_content = self.has_content;
+        let saved_box_context = self.box_context;
         self.pending_gap = 0.0;
         self.has_content = false;
+        self.box_context = Some(BoxContext {
+            width,
+            height: props.explicit_height,
+        });
 
         self.walk_container(el, style, 0.0);
 
         let inner_blocks = std::mem::replace(&mut self.blocks, saved_blocks);
         self.pending_gap = saved_pending_gap;
         self.has_content = saved_has_content;
+        self.box_context = saved_box_context;
 
         self.blocks.push(ContentBlock::Positioned {
             x,
@@ -737,15 +808,16 @@ impl Converter {
         self.push_gap(margin);
         let content_width = self.content_width();
         let rect = Rect::new(indent, 0.0, (content_width - indent).max(1.0), 0.5);
-        self.blocks.push(ContentBlock::Commands(vec![DrawCommand::FillRect {
-            rect,
-            color: Color::gray(0.6),
-        }]));
+        self.blocks
+            .push(ContentBlock::Commands(vec![DrawCommand::FillRect {
+                rect,
+                color: Color::gray(0.6),
+            }]));
         self.has_content = true;
         self.set_pending(margin);
     }
 
-    fn emit_img(&mut self, el: ElementRef) {
+    fn emit_img(&mut self, el: ElementRef, style: &TextStyle) {
         let Some(src) = el.value().attr("src").map(str::to_string) else {
             self.warnings.push("img element missing src".to_string());
             return;
@@ -760,20 +832,16 @@ impl Converter {
                 Ok(data) => {
                     let id = format!("html-img-{}", self.counter);
                     self.counter += 1;
-                    let width = el
-                        .value()
-                        .attr("width")
-                        .and_then(|v| v.parse::<f64>().ok())
-                        .unwrap_or(data.width as f64);
-                    let height = el
-                        .value()
-                        .attr("height")
-                        .and_then(|v| v.parse::<f64>().ok())
-                        .unwrap_or(data.height as f64);
+                    let natural_w = data.width as f64;
+                    let natural_h = data.height as f64;
                     self.images.push(LoadedImage {
                         id: id.clone(),
                         data,
                     });
+
+                    let (_, props) = self.resolve(el, style);
+                    let (width, height) = self.resolve_image_size(el, &props, natural_w, natural_h);
+
                     self.blocks.push(ContentBlock::Image {
                         image_id: id,
                         dest_rect: Rect::new(0.0, 0.0, width, height),
@@ -791,6 +859,104 @@ impl Converter {
                 .warnings
                 .push(format!("failed to load image '{src}': {e}")),
         }
+    }
+
+    /// Resolve an `<img>`'s destination size in points from (in precedence
+    /// order): CSS `width`/`height` (absolute or `%`, the latter resolved
+    /// against the nearest positioned container's `BoxContext`), then the
+    /// legacy HTML `width`/`height` attributes, then a box-fit or
+    /// content-width-capped fallback so a print page never renders an image
+    /// beyond its declared container — or, absent a container, beyond the
+    /// page's content width. `object-fit: contain` scales to fit preserving
+    /// aspect ratio; the CSS default (`fill`) stretches to the resolved box.
+    fn resolve_image_size(
+        &self,
+        el: ElementRef,
+        props: &ElementProps,
+        natural_w: f64,
+        natural_h: f64,
+    ) -> (f64, f64) {
+        let box_ctx = self.box_context;
+
+        let css_w = props.explicit_width.or_else(|| {
+            props
+                .width_percent
+                .and_then(|pct| box_ctx.map(|b| b.width * pct))
+        });
+        let css_h = props.explicit_height.or_else(|| {
+            props
+                .height_percent
+                .and_then(|pct| box_ctx.and_then(|b| b.height.map(|h| h * pct)))
+        });
+
+        if css_w.is_some() || css_h.is_some() {
+            let fit = props.object_fit.unwrap_or(ObjectFit::Fill);
+            return match (css_w, css_h) {
+                (Some(w), Some(h)) => {
+                    if fit == ObjectFit::Contain && natural_w > 0.0 && natural_h > 0.0 {
+                        let scale = (w / natural_w).min(h / natural_h);
+                        (natural_w * scale, natural_h * scale)
+                    } else {
+                        (w, h)
+                    }
+                }
+                (Some(w), None) => {
+                    let h = if natural_w > 0.0 {
+                        natural_h * (w / natural_w)
+                    } else {
+                        natural_h
+                    };
+                    (w, h)
+                }
+                (None, Some(h)) => {
+                    let w = if natural_h > 0.0 {
+                        natural_w * (h / natural_h)
+                    } else {
+                        natural_w
+                    };
+                    (w, h)
+                }
+                (None, None) => unreachable!("guarded by outer is_some() check"),
+            };
+        }
+
+        // No resolvable CSS size. Legacy HTML width/height attributes come
+        // next (only honored together, matching the historical behavior).
+        let attr_w = el.value().attr("width").and_then(|v| v.parse::<f64>().ok());
+        let attr_h = el
+            .value()
+            .attr("height")
+            .and_then(|v| v.parse::<f64>().ok());
+        if let (Some(w), Some(h)) = (attr_w, attr_h) {
+            return (w, h);
+        }
+
+        if let Some(b) = box_ctx {
+            // No resolvable CSS size, but inside a positioned container
+            // with a known box — fit to the box (contain semantics) rather
+            // than natural size, so a print page never renders an image
+            // larger than its declared container. Never upscale beyond
+            // natural size.
+            let scale = match b.height {
+                Some(h) if natural_w > 0.0 && natural_h > 0.0 => {
+                    (b.width / natural_w).min(h / natural_h).min(1.0)
+                }
+                None if natural_w > 0.0 => (b.width / natural_w).min(1.0),
+                _ => 1.0,
+            };
+            return (natural_w * scale, natural_h * scale);
+        }
+
+        // No container, no CSS size, no HTML attributes: cap at the
+        // remaining content width so an oversized natural image can never
+        // render larger than the page.
+        let content_w = self.content_width();
+        let scale = if natural_w > content_w && natural_w > 0.0 {
+            content_w / natural_w
+        } else {
+            1.0
+        };
+        (natural_w * scale, natural_h * scale)
     }
 
     fn load_image_bytes(&self, src: &str) -> Result<Option<Vec<u8>>, String> {
@@ -840,7 +1006,9 @@ impl Converter {
         if rows.is_empty() {
             return;
         }
-        let columns: Vec<Column> = (0..max_cols).map(|_| Column::new(ColumnWidth::Auto)).collect();
+        let columns: Vec<Column> = (0..max_cols)
+            .map(|_| Column::new(ColumnWidth::Auto))
+            .collect();
 
         let default_margin = el_style.size * 0.5;
         self.open_block(&ElementProps {
@@ -1266,5 +1434,166 @@ mod tests {
             .blocks
             .iter()
             .any(|b| matches!(b, ContentBlock::Positioned { .. })));
+    }
+
+    // ─── Image sizing (percentages, object-fit, container caps) ───────
+
+    // A synthetic 20x10 PNG (2:1 aspect ratio), base64-encoded on demand,
+    // for sizing tests where the exact natural pixel dimensions matter.
+    fn png_20x10_b64() -> String {
+        base64_encode(&fake_png_bytes(20, 10))
+    }
+
+    fn img_html(inner_style: &str, container_style: &str) -> String {
+        format!(
+            r#"<div style="position:absolute;left:0;top:0;{container}"><img src="data:image/png;base64,{png}" style="{inner}"/></div>"#,
+            container = container_style,
+            png = png_20x10_b64(),
+            inner = inner_style,
+        )
+    }
+
+    fn find_positioned_image(c: &ConvertedDocument) -> (f64, f64, f64, f64) {
+        for b in &c.blocks {
+            if let ContentBlock::Positioned { blocks, .. } = b {
+                for inner in blocks {
+                    if let ContentBlock::Image { dest_rect, .. } = inner {
+                        return (dest_rect.x, dest_rect.y, dest_rect.width, dest_rect.height);
+                    }
+                }
+            }
+        }
+        panic!("no positioned image found, blocks: {:?}", c.blocks);
+    }
+
+    #[test]
+    fn img_percent_size_with_object_fit_contain_fits_container_box() {
+        let html = img_html(
+            "width:100%;height:100%;object-fit:contain",
+            "width:144pt;height:72pt",
+        );
+        let c = blocks_of(&html);
+        let (x, y, w, h) = find_positioned_image(&c);
+        assert!(w <= 144.0 + 1e-6, "width {w} should be <= 144");
+        assert!(h <= 72.0 + 1e-6, "height {h} should be <= 72");
+        // Natural aspect is 20:10 = 2:1, same as the 144:72 box, so contain
+        // should fit it exactly.
+        assert!((w - 144.0).abs() < 1e-6, "expected exact fit, got w={w}");
+        assert!((h - 72.0).abs() < 1e-6, "expected exact fit, got h={h}");
+        assert_eq!(x, 0.0);
+        assert_eq!(y, 0.0);
+        assert!(
+            c.warnings
+                .iter()
+                .all(|w| !w.contains("height") && !w.contains("object-fit")),
+            "should not warn on supported height/object-fit, got {:?}",
+            c.warnings
+        );
+    }
+
+    #[test]
+    fn img_no_css_size_inside_positioned_container_fits_box_not_natural() {
+        // No width/height/object-fit on the <img> itself; the container has
+        // a known box. The image must be fit to the box, not rendered at
+        // its (potentially huge) natural pixel size.
+        let html = img_html("", "width:50pt;height:50pt");
+        let c = blocks_of(&html);
+        let (_, _, w, h) = find_positioned_image(&c);
+        assert!(
+            w <= 50.0 + 1e-6,
+            "width {w} should be capped to box, not natural 20px"
+        );
+        assert!(
+            h <= 50.0 + 1e-6,
+            "height {h} should be capped to box, not natural 10px"
+        );
+    }
+
+    #[test]
+    fn img_percent_width_without_container_falls_back_sanely() {
+        // width:100% on an <img> with no positioned-container box context:
+        // there's nothing to resolve the percentage against, so it must not
+        // panic or produce a nonsensical size — it falls back to the
+        // content-width cap.
+        let c = blocks_of(&format!(
+            r#"<img src="data:image/png;base64,{png}" style="width:100%"/>"#,
+            png = png_20x10_b64()
+        ));
+        let ContentBlock::Image { dest_rect, .. } = &c.blocks[0] else {
+            panic!("expected Image block, got {:?}", c.blocks[0]);
+        };
+        assert!(dest_rect.width > 0.0 && dest_rect.height > 0.0);
+        assert!(
+            dest_rect.width <= 468.0 + 1e-6,
+            "should be capped at content width"
+        );
+    }
+
+    #[test]
+    fn oversized_natural_image_with_no_styles_capped_at_content_width() {
+        // A 2000px-wide logo with no CSS sizing at all, outside any
+        // positioned container, must never render larger than the page's
+        // content width.
+        let png_2000w = fake_png_bytes(2000, 1000);
+        let b64 = base64_encode(&png_2000w);
+        let c = blocks_of(&format!(r#"<img src="data:image/png;base64,{b64}"/>"#));
+        let ContentBlock::Image { dest_rect, .. } = &c.blocks[0] else {
+            panic!("expected Image block, got {:?}", c.blocks[0]);
+        };
+        // Default letter page: 612pt wide, 72pt margins each side => 468pt
+        // content width.
+        assert!(
+            dest_rect.width <= 468.0 + 1e-6,
+            "expected width capped at 468pt content width, got {}",
+            dest_rect.width
+        );
+        assert!(
+            (dest_rect.width / dest_rect.height - 2.0).abs() < 1e-6,
+            "aspect ratio must be preserved (2:1), got {}x{}",
+            dest_rect.width,
+            dest_rect.height
+        );
+    }
+
+    /// Build a minimal valid PNG of the given pixel dimensions (1-bit,
+    /// solid black) purely so `ImageData::load_from_bytes` reports the
+    /// requested `width`/`height` — pixel content is irrelevant to these
+    /// sizing tests.
+    fn fake_png_bytes(width: u32, height: u32) -> Vec<u8> {
+        // Reuse the tiny synthetic PNG encoder path via the `png` crate
+        // that `ImageData` already depends on transitively is overkill
+        // here; instead, hand-construct a PNG using the `image` crate if
+        // available in this workspace's dependency graph via ImageData.
+        use std::io::Cursor;
+        let img = image::RgbImage::from_pixel(width, height, image::Rgb([0, 0, 0]));
+        let mut buf = Vec::new();
+        image::DynamicImage::ImageRgb8(img)
+            .write_to(&mut Cursor::new(&mut buf), image::ImageFormat::Png)
+            .expect("encode png");
+        buf
+    }
+
+    fn base64_encode(bytes: &[u8]) -> String {
+        const ALPHABET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+        let mut out = String::new();
+        for chunk in bytes.chunks(3) {
+            let b0 = chunk[0];
+            let b1 = *chunk.get(1).unwrap_or(&0);
+            let b2 = *chunk.get(2).unwrap_or(&0);
+            let n = (b0 as u32) << 16 | (b1 as u32) << 8 | b2 as u32;
+            out.push(ALPHABET[(n >> 18 & 0x3f) as usize] as char);
+            out.push(ALPHABET[(n >> 12 & 0x3f) as usize] as char);
+            out.push(if chunk.len() > 1 {
+                ALPHABET[(n >> 6 & 0x3f) as usize] as char
+            } else {
+                '='
+            });
+            out.push(if chunk.len() > 2 {
+                ALPHABET[(n & 0x3f) as usize] as char
+            } else {
+                '='
+            });
+        }
+        out
     }
 }

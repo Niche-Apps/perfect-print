@@ -13,8 +13,16 @@ fn html_renders_to_pdf_bytes() {
 #[test]
 fn deterministic_output() {
     let html = "<h1>Same</h1><p>Every time</p>";
-    let a = HtmlDocument::new(html).render().unwrap().to_pdf_bytes().unwrap();
-    let b = HtmlDocument::new(html).render().unwrap().to_pdf_bytes().unwrap();
+    let a = HtmlDocument::new(html)
+        .render()
+        .unwrap()
+        .to_pdf_bytes()
+        .unwrap();
+    let b = HtmlDocument::new(html)
+        .render()
+        .unwrap()
+        .to_pdf_bytes()
+        .unwrap();
     assert_eq!(a, b);
 }
 
@@ -60,8 +68,10 @@ fn explicit_page_settings_win_over_at_page() {
 
 #[test]
 fn caller_title_wins_over_html_title() {
-    let doc = HtmlDocument::new("<html><head><title>From HTML</title></head><body><p>x</p></body></html>")
-        .title("From Caller");
+    let doc = HtmlDocument::new(
+        "<html><head><title>From HTML</title></head><body><p>x</p></body></html>",
+    )
+    .title("From Caller");
     let result = doc.render().unwrap();
     assert_eq!(result.model.metadata.title.as_deref(), Some("From Caller"));
 }
