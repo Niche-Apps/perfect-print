@@ -70,36 +70,53 @@ impl PdfRenderer {
         // Set up font loader for embedding
         let font_loader = perfect_print_layout::font_loader::SystemFontLoader::new();
 
-        // Collect all unique font names used in the document
-        let mut font_names: Vec<String> = Vec::new();
+        // Collect all unique (family, bold, italic) combinations used in the
+        // document. Bold/italic runs must embed the actual bold/italic face
+        // — not just the regular face under a different label — because the
+        // glyph IDs baked into each run's `ShapedGlyph`s were produced by
+        // shaping against that specific face (see
+        // `paragraph::font_properties_for_style`); embedding the wrong face
+        // would map those glyph IDs to the wrong outlines.
+        let mut font_keys: Vec<PdfFontKey> = Vec::new();
         for cmd in document.all_commands() {
             if let DrawCommand::Text { run, .. } = cmd {
-                let name = run.style.font.as_ref().to_string();
-                if !font_names.contains(&name) {
-                    font_names.push(name);
+                let key = PdfFontKey::from_style(&run.style);
+                if !font_keys.contains(&key) {
+                    font_keys.push(key);
                 }
             }
         }
         // Default to Helvetica if no text found
-        if font_names.is_empty() {
-            font_names.push("Helvetica".to_string());
+        if font_keys.is_empty() {
+            font_keys.push(PdfFontKey::from_style(
+                &perfect_print_core::draw::TextStyle::new(
+                    perfect_print_core::font::FontRef::new("Helvetica"),
+                    12.0,
+                ),
+            ));
         }
 
-        // Embed each font: (font_name, font_object_id)
-        let mut embedded_fonts: Vec<(String, lopdf::ObjectId)> = Vec::new();
-        for font_name in &font_names {
+        // Embed each font: (font_key, font_object_id)
+        let mut embedded_fonts: Vec<(PdfFontKey, lopdf::ObjectId)> = Vec::new();
+        for key in &font_keys {
             let mut font_embedded = false;
-            if let Some((font_data, _)) = font_loader.get_font_data(font_name) {
-                let (descriptor_id, _) = embed_truetype_font(&mut pdf, &font_data, font_name);
-                let font_obj = pdf_embedded_font(font_name, descriptor_id);
+            if let Some((font_data, face_index)) = font_loader.get_font_data_for(&key.to_properties())
+            {
+                let (descriptor_id, _) = embed_truetype_font(
+                    &mut pdf,
+                    &font_data,
+                    face_index,
+                    &key.base_font_name(),
+                );
+                let font_obj = pdf_embedded_font(&key.base_font_name(), descriptor_id);
                 let font_id = pdf.add_object(font_obj);
-                embedded_fonts.push((font_name.clone(), font_id));
+                embedded_fonts.push((key.clone(), font_id));
                 font_embedded = true;
             }
             if !font_embedded {
                 // Fallback: use standard Type1 font (not embedded)
-                let font_id = pdf.add_object(pdf_font_descriptor(font_name));
-                embedded_fonts.push((font_name.clone(), font_id));
+                let font_id = pdf.add_object(pdf_font_descriptor(&key.base_font_name()));
+                embedded_fonts.push((key.clone(), font_id));
             }
         }
 
@@ -161,7 +178,7 @@ impl PdfRenderer {
         pdf: &mut lopdf::Document,
         page: &perfect_print_core::page::Page,
         parent_id: lopdf::ObjectId,
-        embedded_fonts: &[(String, lopdf::ObjectId)],
+        embedded_fonts: &[(PdfFontKey, lopdf::ObjectId)],
         image_store: &perfect_print_core::resource::ImageStore,
     ) -> PdfResult<lopdf::ObjectId> {
         use lopdf::{Dictionary, Object, Stream};
@@ -306,7 +323,7 @@ impl PdfRenderer {
         cmd: &DrawCommand,
         page_height: f64,
         xobject_names: &[(String, lopdf::ObjectId)],
-        embedded_fonts: &[(String, lopdf::ObjectId)],
+        embedded_fonts: &[(PdfFontKey, lopdf::ObjectId)],
     ) -> PdfResult<()> {
         match cmd {
             DrawCommand::FillRect { rect, color } => {
@@ -352,8 +369,11 @@ impl PdfRenderer {
                 let y = page_height - position.y;
                 content.push_str("BT\n");
 
-                // Find the font reference for this run's font
-                let font_key = find_font_key(run.style.font.as_ref(), embedded_fonts);
+                // Find the font reference for this run's font, matching
+                // family AND bold/italic so the glyph IDs (shaped against a
+                // specific face) line up with the embedded face.
+                let key = PdfFontKey::from_style(&run.style);
+                let font_key = find_font_key(&key, embedded_fonts);
                 content.push_str(&format!("/{} {} Tf\n", font_key, run.style.size));
                 content.push_str(&format!("{} {} Td\n", position.x, y));
 
@@ -457,10 +477,57 @@ impl PdfRenderer {
     }
 }
 
-/// Find the font key (e.g., "F1", "F2") for a given font name in the embedded fonts list.
-fn find_font_key(font_name: &str, embedded_fonts: &[(String, lopdf::ObjectId)]) -> String {
-    for (i, (name, _)) in embedded_fonts.iter().enumerate() {
-        if name == font_name {
+/// Identifies a distinct embedded PDF font resource: family + weight/style.
+/// Two text runs with the same family but different bold/italic must embed
+/// (and reference) different font resources, since the glyph IDs baked into
+/// their `ShapedGlyph`s come from shaping against that specific face.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PdfFontKey {
+    family: String,
+    bold: bool,
+    italic: bool,
+}
+
+impl PdfFontKey {
+    fn from_style(style: &perfect_print_core::draw::TextStyle) -> Self {
+        Self {
+            family: style.font.as_ref().to_string(),
+            bold: style.bold,
+            italic: style.italic,
+        }
+    }
+
+    fn to_properties(&self) -> perfect_print_layout::font_loader::FontProperties {
+        use perfect_print_core::font::{FontStyle, FontWeight};
+        perfect_print_layout::font_loader::FontProperties::new(&self.family)
+            .with_weight(if self.bold {
+                FontWeight::Bold
+            } else {
+                FontWeight::Normal
+            })
+            .with_style(if self.italic {
+                FontStyle::Italic
+            } else {
+                FontStyle::Normal
+            })
+    }
+
+    /// Human-readable BaseFont name for the PDF font dictionary, e.g.
+    /// "Helvetica-BoldItalic".
+    fn base_font_name(&self) -> String {
+        match (self.bold, self.italic) {
+            (true, true) => format!("{}-BoldItalic", self.family),
+            (true, false) => format!("{}-Bold", self.family),
+            (false, true) => format!("{}-Italic", self.family),
+            (false, false) => self.family.clone(),
+        }
+    }
+}
+
+/// Find the font key (e.g., "F1", "F2") for a given font in the embedded fonts list.
+fn find_font_key(key: &PdfFontKey, embedded_fonts: &[(PdfFontKey, lopdf::ObjectId)]) -> String {
+    for (i, (candidate, _)) in embedded_fonts.iter().enumerate() {
+        if candidate == key {
             return format!("F{}", i + 1);
         }
     }
@@ -490,12 +557,17 @@ fn pdf_font_descriptor(name: &str) -> lopdf::Object {
 fn embed_truetype_font(
     pdf: &mut lopdf::Document,
     font_data: &[u8],
+    face_index: u32,
     font_name: &str,
 ) -> (lopdf::ObjectId, lopdf::ObjectId) {
     use lopdf::{Dictionary, Object, Stream};
 
-    // Parse basic font metrics from the raw TTF data using ttf-parser
-    let face = ttf_parser::Face::parse(font_data, 0).ok();
+    // Parse basic font metrics from the raw TTF/TTC data using ttf-parser.
+    // `face_index` selects the right face within a TrueType Collection
+    // (.ttc) — e.g. a system "Helvetica" bundle where index 0 is Regular,
+    // 1 is Bold, etc. Using a fixed index 0 here would report Regular
+    // metrics (ascent/descent/italic angle) for every weight/style.
+    let face = ttf_parser::Face::parse(font_data, face_index).ok();
     let ascender = face.as_ref().map(|f| f.ascender() as i64).unwrap_or(800);
     let descender = face.as_ref().map(|f| f.descender() as i64).unwrap_or(-200);
     let cap_height = face

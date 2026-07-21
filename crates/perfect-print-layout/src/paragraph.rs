@@ -1,9 +1,26 @@
 use perfect_print_core::draw::{ShapedGlyph, TextAlign, TextStyle};
-use perfect_print_core::font::FontRef;
+use perfect_print_core::font::{FontRef, FontStyle, FontWeight};
 use rustybuzz::Direction;
 
 use crate::font_loader::{FontCache, FontProperties, LoadedFont};
 use crate::text_shaper::TextShaper;
+
+/// Build font lookup properties from a `TextStyle`, mapping `bold`/`italic`
+/// onto the font database's weight/style axes so the correct font face
+/// (not just a synthetically-scaled regular face) is selected for shaping.
+fn font_properties_for_style(style: &TextStyle) -> FontProperties {
+    FontProperties::new(style.font.as_ref())
+        .with_weight(if style.bold {
+            FontWeight::Bold
+        } else {
+            FontWeight::Normal
+        })
+        .with_style(if style.italic {
+            FontStyle::Italic
+        } else {
+            FontStyle::Normal
+        })
+}
 
 /// A positioned glyph within a line.
 #[derive(Debug, Clone, PartialEq)]
@@ -548,7 +565,7 @@ impl ParagraphEngine {
             max_height = max_height.max(line_height);
             last_style = style.clone();
 
-            let font = self.font_cache.get_by_family(style.font.as_ref());
+            let font = self.font_cache.get(&font_properties_for_style(style));
             let word_glyphs = font
                 .as_ref()
                 .map(|font| {
@@ -702,7 +719,7 @@ impl ParagraphEngine {
             }
             frag_style = Some(style.clone());
 
-            let font = self.font_cache.get_by_family(style.font.as_ref());
+            let font = self.font_cache.get(&font_properties_for_style(style));
             let word_glyphs = font
                 .as_ref()
                 .map(|font| {
@@ -765,8 +782,7 @@ impl ParagraphEngine {
     }
 
     fn load_font(&mut self, style: &TextStyle) -> Option<LoadedFont> {
-        let props = FontProperties::new(style.font.as_ref());
-        self.font_cache.get(&props)
+        self.font_cache.get(&font_properties_for_style(style))
     }
 }
 

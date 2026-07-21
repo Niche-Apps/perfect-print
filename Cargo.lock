@@ -4945,6 +4945,7 @@ dependencies = [
  "perfect-print-backend-macos",
  "perfect-print-core",
  "perfect-print-dialog",
+ "perfect-print-html",
  "perfect-print-layout",
  "perfect-print-pdf",
  "perfect-print-render",
