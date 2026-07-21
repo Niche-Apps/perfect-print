@@ -339,9 +339,19 @@ impl FlowLayoutEngine {
                         Some(default) => merge_styles(default, base_style),
                         None => base_style.clone(),
                     };
+                    // Each span's own style inherits from the document default
+                    // the same way a plain Paragraph's style does — unset
+                    // fields (empty font, zero size, default black/left) fall
+                    // back to `default_style`.
                     let span_pairs: Vec<(String, TextStyle)> = spans
                         .iter()
-                        .map(|s| (s.text.clone(), s.style.clone()))
+                        .map(|s| {
+                            let style = match &self.config.default_style {
+                                Some(default) => merge_styles(default, &s.style),
+                                None => s.style.clone(),
+                            };
+                            (s.text.clone(), style)
+                        })
                         .collect();
                     let avail_width = (content_width - indent_left).max(1.0);
                     let rows = self
@@ -1020,6 +1030,101 @@ mod tests {
         let doc = engine.layout(&blocks);
         assert!(doc.page_count() >= 1);
         // The document should have been laid out successfully with inherited styles
+    }
+
+    /// Proves (not just exercises) style inheritance end-to-end: a paragraph
+    /// built with the "unset" TextStyle that the public `Document`/`Paragraph`
+    /// API never actually produces on its own (empty font, zero size, default
+    /// black color, default left alignment) still resolves to the document's
+    /// `default_style` on the rendered `DrawCommand::Text` runs.
+    ///
+    /// See `docs/IMPROVEMENT-PLAN.md` item 6 — this closes it out as Done:
+    /// `FlowConfig.default_style` + `merge_styles` (used by both the
+    /// `Paragraph` and `RichParagraph` arms of `FlowLayoutEngine::layout`) is
+    /// the real wiring; `Document::default_style()` just sets that field.
+    #[test]
+    fn test_paragraph_inherits_flow_default_style() {
+        use perfect_print_core::font::FontRef;
+
+        let mut default = TextStyle::new(FontRef::new("Times New Roman"), 14.0);
+        default.color = Color::rgb(1.0, 0.0, 0.0);
+        default.align = TextAlign::Center;
+
+        let config = FlowConfig {
+            page_size: PageSize::Letter,
+            margins: Margins::all(72.0),
+            default_style: Some(default.clone()),
+            ..Default::default()
+        };
+
+        // An "unset" paragraph style: empty font name, zero size, default
+        // black color, default left alignment — every field merge_styles
+        // treats as "fall back to the document default".
+        let unset_style = TextStyle::new(FontRef::new(""), 0.0);
+
+        let mut engine = FlowLayoutEngine::new(config);
+        let blocks = vec![ContentBlock::paragraph("Hello", unset_style)];
+        let doc = engine.layout(&blocks);
+
+        let run = doc
+            .pages
+            .iter()
+            .flat_map(|p| p.layers.iter())
+            .flat_map(|l| l.commands.iter())
+            .find_map(|c| match c {
+                DrawCommand::Text { run, .. } => Some(run),
+                _ => None,
+            })
+            .expect("expected a text run");
+
+        assert_eq!(run.style.font, default.font, "font should be inherited");
+        assert_eq!(run.style.size, default.size, "size should be inherited");
+        assert_eq!(run.style.color, default.color, "color should be inherited");
+        assert_eq!(run.style.align, default.align, "align should be inherited");
+    }
+
+    /// Same contract, but through the `RichParagraph` path added alongside
+    /// mixed-style spans: `base_style` merges with the document default too.
+    #[test]
+    fn test_rich_paragraph_inherits_flow_default_style() {
+        use perfect_print_core::font::FontRef;
+
+        let mut default = TextStyle::new(FontRef::new("Times New Roman"), 14.0);
+        default.color = Color::rgb(0.0, 0.0, 1.0);
+
+        let config = FlowConfig {
+            page_size: PageSize::Letter,
+            margins: Margins::all(72.0),
+            default_style: Some(default.clone()),
+            ..Default::default()
+        };
+
+        let unset_style = TextStyle::new(FontRef::new(""), 0.0);
+        let block = ContentBlock::RichParagraph {
+            spans: vec![StyledSpan {
+                text: "Hello".into(),
+                style: unset_style.clone(),
+            }],
+            base_style: unset_style,
+            indent_left: 0.0,
+        };
+
+        let mut engine = FlowLayoutEngine::new(config);
+        let doc = engine.layout(&[block]);
+
+        let run = doc
+            .pages
+            .iter()
+            .flat_map(|p| p.layers.iter())
+            .flat_map(|l| l.commands.iter())
+            .find_map(|c| match c {
+                DrawCommand::Text { run, .. } => Some(run),
+                _ => None,
+            })
+            .expect("expected a text run");
+        assert_eq!(run.style.font, default.font, "font should be inherited");
+        assert_eq!(run.style.size, default.size, "size should be inherited");
+        assert_eq!(run.style.color, default.color, "color should be inherited");
     }
 
     // ─── Fuzz / Randomized Tests ────────────────────────────────────

@@ -158,7 +158,7 @@ Core build/test status should be verified with `cargo test --workspace`. Several
 | 3 | Structured error types | Done | 7 (PrintError, PrintWarning, Strictness, ValidationResult) |
 | 4 | Table cell measurement | Done | 3 (row height tests) |
 | 5 | JSON roundtrip stability | Done | 1 (roundtrip test) |
-| 6 | Style inheritance | Deferred | Low priority |
+| 6 | Style inheritance | Done | 2 (rich/plain paragraph default-style inheritance) |
 
 ### Verifiable end states achieved:
 - **Alignment**: Right-aligned text has glyphs positioned at `max_width - line_width`. Center-aligned glyphs are centered. Justified text distributes extra space between words.
@@ -166,6 +166,7 @@ Core build/test status should be verified with `cargo test --workspace`. Several
 - **Error types**: `PrintError` implements `std::error::Error` with `thiserror`, has `with_context()` for chaining, `is_not_found()` / `is_validation()` helpers. `ValidationResult` supports `Strictness::BestEffort/Warn/Exact`.
 - **Table measurement**: `TableEngine` uses `TextShaper` + `FontCache` for actual glyph width measurement instead of char-count estimates.
 - **JSON roundtrip**: `DocumentModel` serializes to JSON, deserializes back, and produces stable JSON at the model layer. The public `Document::from_json()` path now preserves pages and commands instead of returning an empty document.
+- **Style inheritance**: `FlowConfig.default_style` (set via `Document::default_style()`) is merged into every `Paragraph` and `RichParagraph` (including each of its spans) via `merge_styles()` in `flow.rs`: unset fields (empty font, zero size, default black color, default left alignment) fall back to the document default; explicitly-set fields win. `test_paragraph_inherits_flow_default_style` and `test_rich_paragraph_inherits_flow_default_style` in `crates/perfect-print-layout/src/flow.rs` assert the merged font/size/color reach the rendered `DrawCommand::Text` runs, not just that layout succeeds.
 
 - Hyphenation (requires a hyphenation dictionary)
 - Fuzz testing (requires `cargo-fuzz` setup)
