@@ -18,6 +18,7 @@ perfect-print-layout = { path = "../perfect-print-layout" }
 perfect-print-render = { path = "../perfect-print-render" }
 perfect-print-pdf = { path = "../perfect-print-pdf" }
 perfect-print-dialog = { path = "../perfect-print-dialog" }
+perfect-print-html = { path = "../perfect-print-html" }
 clap = { workspace = true }
 env_logger = { workspace = true }
 anyhow = { workspace = true }

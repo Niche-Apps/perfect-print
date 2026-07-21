@@ -28,13 +28,40 @@ doc.save_pdf("output.pdf")?;
 let paths = doc.render_png("output-pages", 300)?;
 ```
 
+## HTML to PDF
+
+`perfect-print-html` renders a supported HTML/CSS subset straight to the
+canonical document model — no browser or WebView involved, so output is
+deterministic and CI-testable. See
+[`docs/html-css-support.md`](docs/html-css-support.md) for the full supported
+tag/CSS-property list and the graceful-degradation policy.
+
+```rust
+use perfect_print_html::HtmlDocument;
+
+let doc = HtmlDocument::new(
+    "<h1>Report</h1><p>Hello <b>world</b>, rendered by <i>pure Rust</i>.</p>",
+);
+doc.save_pdf("report.pdf")?;
+
+// Or drive the pipeline manually to also get PNG pages and warnings:
+let result = doc.render()?;
+result.save_pdf("report.pdf")?;
+let pages = result.render_png("report-pages", 300)?;
+for warning in &result.warnings {
+    eprintln!("warning: {warning}");
+}
+```
+
 ## Features
 
 - **One canonical page model** — PDF, raster, preview, and print all consume the same model
 - **Exact units** — points, inches, mm, px-at-DPI
 - **Text shaping** — rustybuzz-powered shaping with bidi, ligatures, and kerning foundations
+- **Rich text** — mixed-style paragraphs (`RichParagraph`) and bulleted/numbered lists (`List`), inheriting document-level default styles
+- **HTML/CSS rendering** — pure-Rust HTML/CSS subset → `DocumentModel` → PDF/PNG/print, no browser or WebView (see `perfect-print-html`)
 - **Image support** — PNG/JPEG loading, rendering in both raster and PDF backends
-- **PDF output** — with embedded images (FlateDecode XObjects) and text output
+- **PDF output** — with embedded images (FlateDecode XObjects), embedded fonts (including the correct bold/italic face, not a synthetic regular face), and text output
 - **Raster output** — via tiny-skia, any DPI
 - **Print backend** — macOS via CUPS (`lp`/`lpstat`); other backends are still maturing
 - **Visual diff CLI** — pixel-by-pixel PNG comparison with heatmaps
@@ -46,15 +73,24 @@ let paths = doc.render_png("output-pages", 300)?;
 ## Architecture
 
 ```
-perfect-print/          Ergonomic public API (Document, Paragraph, Image)
+perfect-print/          Ergonomic public API (Document, Paragraph, RichParagraph, List, Image)
 perfect-print-core/     Canonical document model, units, pages, draw commands
 perfect-print-layout/   Text shaping, flow layout, pagination, tables
+perfect-print-html/     HTML/CSS subset → ContentBlocks (scraper + hand-rolled CSS cascade)
 perfect-print-render/   Raster renderer (tiny-skia)
 perfect-print-pdf/      PDF generator (lopdf)
 perfect-print-dialog/   Print settings, printer capabilities
 perfect-print-backend-macos/   macOS print backend (CUPS)
-perfect-print-cli/      CLI for render, verify, print, diagnostics, printers
+perfect-print-cli/      CLI for render, render-html, verify, print, diagnostics, printers
 ```
+
+The HTML pipeline is pure Rust end to end: `scraper`/`html5ever` parses the
+DOM, a hand-rolled CSS subset parser resolves the cascade (inline `style=`,
+`<style>` blocks, `@page`), and the styled DOM is lowered into the same
+`ContentBlock`s (`RichParagraph`, `List`, `Table`, `Image`, ...) that
+`perfect-print`'s own `Document` builder produces — so it reuses the existing
+`FlowLayoutEngine` → `DocumentModel` → PDF/raster/print backends rather than
+introducing a second rendering path.
 
 ## Verification Commands
 
@@ -67,6 +103,9 @@ cargo test --workspace
 
 # Render an example to PDF + PNG
 cargo run -p perfect-print-cli -- render hello --pdf output.pdf --png-dir pages/
+
+# Render HTML/CSS to PDF + PNG (pure-Rust pipeline, no browser)
+cargo run -p perfect-print-cli -- render-html input.html --pdf output.pdf --png-dir pages/ --dpi 300
 
 # List printers
 cargo run -p perfect-print-cli -- printers
@@ -121,11 +160,12 @@ doc.save_pdf("catalog.pdf")?;
 | `perfect-print` | Public ergonomic API |
 | `perfect-print-core` | Canonical model, units, draw commands |
 | `perfect-print-layout` | Text shaping, flow, tables |
+| `perfect-print-html` | HTML/CSS subset → `ContentBlock`s (pure Rust, no WebView) |
 | `perfect-print-render` | Raster rendering (tiny-skia) |
 | `perfect-print-pdf` | PDF generation (lopdf) |
 | `perfect-print-dialog` | Print settings, capabilities |
 | `perfect-print-backend-macos` | macOS CUPS backend |
-| `perfect-print-cli` | CLI + golden tests |
+| `perfect-print-cli` | CLI (`render`, `render-html`, ...) + golden tests |
 
 ## License
 

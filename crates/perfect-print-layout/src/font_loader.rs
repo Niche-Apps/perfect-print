@@ -81,11 +81,22 @@ impl SystemFontLoader {
     /// Get the raw font data for a font matching the given family name.
     /// Returns (font_data, font_index) if found.
     pub fn get_font_data(&self, family: &str) -> Option<(Vec<u8>, u32)> {
+        self.get_font_data_for(&FontProperties::new(family))
+    }
+
+    /// Get the raw font data for a font matching the given family, weight,
+    /// and style (e.g. the actual bold/italic face, not just the regular
+    /// face scaled or slanted synthetically). Returns (font_data, font_index)
+    /// if found.
+    pub fn get_font_data_for(&self, properties: &FontProperties) -> Option<(Vec<u8>, u32)> {
         let query = fontdb::Query {
-            families: &[fontdb::Family::Name(family)],
-            weight: fontdb::Weight::NORMAL,
+            families: &[fontdb::Family::Name(&properties.family)],
+            weight: fontdb::Weight(properties.weight.value()),
             stretch: fontdb::Stretch::Normal,
-            style: fontdb::Style::Normal,
+            style: match properties.style {
+                FontStyle::Normal => fontdb::Style::Normal,
+                FontStyle::Italic => fontdb::Style::Italic,
+            },
         };
         let face_id = self.db.query(&query)?;
         self.load_font_data(face_id)
@@ -286,6 +297,39 @@ impl Default for FontCache {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn get_font_data_for_selects_the_requested_weight_and_style() {
+        let loader = SystemFontLoader::new();
+        let normal = loader.get_font_data_for(&FontProperties::new("Helvetica"));
+        let bold = loader.get_font_data_for(
+            &FontProperties::new("Helvetica").with_weight(FontWeight::Bold),
+        );
+        let italic = loader.get_font_data_for(
+            &FontProperties::new("Helvetica").with_style(FontStyle::Italic),
+        );
+        // Skip if the system doesn't have Helvetica at all.
+        if normal.is_none() {
+            return;
+        }
+        // Regular, bold, and italic must resolve to different faces within
+        // the font source (a distinct face_index for a TrueType Collection,
+        // or distinct bytes for separate font files) — this is what
+        // distinguishes the actual bold/italic glyph outlines from a
+        // synthetically-unstyled regular face.
+        if let (Some((_, normal_index)), Some((_, bold_index))) = (&normal, &bold) {
+            assert_ne!(
+                normal_index, bold_index,
+                "bold face_index should differ from regular"
+            );
+        }
+        if let (Some((_, normal_index)), Some((_, italic_index))) = (&normal, &italic) {
+            assert_ne!(
+                normal_index, italic_index,
+                "italic face_index should differ from regular"
+            );
+        }
+    }
 
     #[test]
     fn test_system_font_loader() {

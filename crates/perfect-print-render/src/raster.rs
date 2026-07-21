@@ -25,6 +25,11 @@ struct CachedFont {
 
 /// Font cache for the raster renderer.
 struct FontCache {
+    /// Keyed by "family|bold|italic" — family alone is not enough, since a
+    /// bold or italic `TextRun` must be rendered with the actual bold/italic
+    /// face (its `ShapedGlyph`s were shaped against that face's glyph IDs
+    /// upstream in `ParagraphEngine`; drawing them with the regular face's
+    /// outlines would paint the wrong glyphs).
     fonts: HashMap<String, Arc<CachedFont>>,
     /// Shared font database for system font discovery
     db: fontdb::Database,
@@ -40,27 +45,46 @@ impl FontCache {
         }
     }
 
-    /// Load a font by its FontRef name. Uses a shared font database.
-    fn load_font(&mut self, font_ref: &FontRef) -> Option<Arc<CachedFont>> {
-        if let Some(cached) = self.fonts.get(font_ref.as_ref()) {
+    fn cache_key(font_ref: &FontRef, bold: bool, italic: bool) -> String {
+        format!("{}|{}|{}", font_ref.as_ref(), bold, italic)
+    }
+
+    /// Load a font by its `FontRef` name plus bold/italic. Uses a shared
+    /// font database.
+    fn load_font(&mut self, font_ref: &FontRef, bold: bool, italic: bool) -> Option<Arc<CachedFont>> {
+        let key = Self::cache_key(font_ref, bold, italic);
+        if let Some(cached) = self.fonts.get(&key) {
             return Some(cached.clone());
         }
 
         let query = fontdb::Query {
             families: &[fontdb::Family::Name(font_ref.as_ref())],
-            weight: fontdb::Weight::NORMAL,
+            weight: if bold {
+                fontdb::Weight::BOLD
+            } else {
+                fontdb::Weight::NORMAL
+            },
             stretch: fontdb::Stretch::Normal,
-            style: fontdb::Style::Normal,
+            style: if italic {
+                fontdb::Style::Italic
+            } else {
+                fontdb::Style::Normal
+            },
         };
 
         let face_id = self.db.query(&query)?;
-        let font_bytes = self.db.with_face_data(face_id, |data, _| data.to_vec())?;
-        let face = Face::parse(&font_bytes, 0).ok()?;
+        // `face_index` matters for TrueType Collections (.ttc), where a
+        // single file bundles multiple faces (e.g. Regular/Bold/Italic) —
+        // discarding it and always parsing index 0 would silently render
+        // every weight/style as the Regular face.
+        let (font_bytes, face_index) =
+            self.db.with_face_data(face_id, |data, idx| (data.to_vec(), idx))?;
+        let face = Face::parse(&font_bytes, face_index).ok()?;
         let units_per_em = face.units_per_em();
 
         // Leak the font data to get 'static lifetime for Face
         let font_data_static: &'static [u8] = Box::leak(font_bytes.into_boxed_slice());
-        let face_static = Face::parse(font_data_static, 0).ok()?;
+        let face_static = Face::parse(font_data_static, face_index).ok()?;
 
         let cached = Arc::new(CachedFont {
             face: face_static,
@@ -68,14 +92,19 @@ impl FontCache {
             glyph_paths: HashMap::new(),
         });
 
-        self.fonts
-            .insert(font_ref.as_ref().to_string(), cached.clone());
+        self.fonts.insert(key, cached.clone());
         Some(cached)
     }
 
     /// Get or build a glyph path for the given glyph ID.
-    fn get_glyph_path(&mut self, font_ref: &FontRef, glyph_id: u32) -> Option<SkPath> {
-        let cached = self.load_font(font_ref)?;
+    fn get_glyph_path(
+        &mut self,
+        font_ref: &FontRef,
+        bold: bool,
+        italic: bool,
+        glyph_id: u32,
+    ) -> Option<SkPath> {
+        let cached = self.load_font(font_ref, bold, italic)?;
         // Check if already cached
         if let Some(path) = cached.glyph_paths.get(&glyph_id) {
             return Some(path.clone());
@@ -286,6 +315,8 @@ impl TinySkiaRenderer {
                 max_width: _,
             } => {
                 let font_ref = &run.style.font;
+                let bold = run.style.bold;
+                let italic = run.style.italic;
                 let font_size = run.style.size as f32;
                 let mut color = run.style.color;
                 color.a *= state.opacity;
@@ -293,7 +324,7 @@ impl TinySkiaRenderer {
 
                 let mut font_cache = self.font_cache.lock().unwrap();
 
-                let loaded_font = font_cache.load_font(font_ref);
+                let loaded_font = font_cache.load_font(font_ref, bold, italic);
                 let units_per_em = loaded_font
                     .as_ref()
                     .map(|font| font.units_per_em)
@@ -313,7 +344,7 @@ impl TinySkiaRenderer {
                             if let Some(glyph_id) = font.face.glyph_index(ch).map(|id| id.0 as u32)
                             {
                                 if let Some(glyph_path) =
-                                    font_cache.get_glyph_path(font_ref, glyph_id)
+                                    font_cache.get_glyph_path(font_ref, bold, italic, glyph_id)
                                 {
                                     let glyph_transform = Transform::from_scale(
                                         font_size / units_per_em,
@@ -353,7 +384,7 @@ impl TinySkiaRenderer {
                 } else {
                     for glyph in &run.glyphs {
                         if let Some(glyph_path) =
-                            font_cache.get_glyph_path(font_ref, glyph.glyph_id)
+                            font_cache.get_glyph_path(font_ref, bold, italic, glyph.glyph_id)
                         {
                             let glyph_x = pen_x + glyph.x_offset;
                             let glyph_y = pen_y + glyph.y_offset;
@@ -669,10 +700,42 @@ mod tests {
         let font_ref = perfect_print_core::font::FontRef::new("Helvetica");
 
         // Load the font and check units_per_em is a reasonable value (typically 1000 or 2048).
-        let font = cache.load_font(&font_ref);
+        let font = cache.load_font(&font_ref, false, false);
         assert!(font.is_some());
         let upem = font.unwrap().units_per_em;
         assert!(upem > 0, "units_per_em must be positive");
         assert!(upem <= 10000, "units_per_em should be reasonable (<=10000)");
+    }
+
+    #[test]
+    fn bold_and_regular_load_distinct_faces() {
+        // Regression test: `load_font` must select the actual bold/italic
+        // face — not silently fall back to face index 0 (Regular) of a
+        // TrueType Collection — otherwise bold/italic text renders
+        // identically to plain text (see raster::FontCache doc comment).
+        let mut cache = FontCache::new();
+        let font_ref = perfect_print_core::font::FontRef::new("Helvetica");
+
+        let Some(regular) = cache.load_font(&font_ref, false, false) else {
+            return; // system lacks Helvetica; nothing to verify
+        };
+        let Some(bold) = cache.load_font(&font_ref, true, false) else {
+            return; // system lacks a bold face; nothing to verify
+        };
+
+        // 'H' should have a measurably wider (heavier) outline in the bold
+        // face than in the regular face.
+        let glyph_regular = regular.face.glyph_index('H');
+        let glyph_bold = bold.face.glyph_index('H');
+        if let (Some(gr), Some(gb)) = (glyph_regular, glyph_bold) {
+            let advance_regular = regular.face.glyph_hor_advance(gr);
+            let advance_bold = bold.face.glyph_hor_advance(gb);
+            if let (Some(ar), Some(ab)) = (advance_regular, advance_bold) {
+                assert!(
+                    ab >= ar,
+                    "bold 'H' advance ({ab}) should be >= regular advance ({ar})"
+                );
+            }
+        }
     }
 }

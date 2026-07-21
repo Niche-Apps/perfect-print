@@ -107,6 +107,14 @@ impl Point {
     pub fn zero() -> Self {
         Self { x: 0.0, y: 0.0 }
     }
+
+    /// Return this point shifted by `(dx, dy)`.
+    pub fn translated(&self, dx: f64, dy: f64) -> Self {
+        Self {
+            x: self.x + dx,
+            y: self.y + dy,
+        }
+    }
 }
 
 /// A 2D size in points.
@@ -158,6 +166,15 @@ impl Rect {
             && point.x <= self.right()
             && point.y >= self.y
             && point.y <= self.bottom()
+    }
+
+    /// Return this rect shifted by `(dx, dy)`; width/height are unchanged.
+    pub fn translated(&self, dx: f64, dy: f64) -> Self {
+        Self {
+            x: self.x + dx,
+            y: self.y + dy,
+            ..*self
+        }
     }
 }
 

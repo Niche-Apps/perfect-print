@@ -158,7 +158,7 @@ Core build/test status should be verified with `cargo test --workspace`. Several
 | 3 | Structured error types | Done | 7 (PrintError, PrintWarning, Strictness, ValidationResult) |
 | 4 | Table cell measurement | Done | 3 (row height tests) |
 | 5 | JSON roundtrip stability | Done | 1 (roundtrip test) |
-| 6 | Style inheritance | Deferred | Low priority |
+| 6 | Style inheritance | Done | 2 (rich/plain paragraph default-style inheritance) |
 
 ### Verifiable end states achieved:
 - **Alignment**: Right-aligned text has glyphs positioned at `max_width - line_width`. Center-aligned glyphs are centered. Justified text distributes extra space between words.
@@ -166,10 +166,68 @@ Core build/test status should be verified with `cargo test --workspace`. Several
 - **Error types**: `PrintError` implements `std::error::Error` with `thiserror`, has `with_context()` for chaining, `is_not_found()` / `is_validation()` helpers. `ValidationResult` supports `Strictness::BestEffort/Warn/Exact`.
 - **Table measurement**: `TableEngine` uses `TextShaper` + `FontCache` for actual glyph width measurement instead of char-count estimates.
 - **JSON roundtrip**: `DocumentModel` serializes to JSON, deserializes back, and produces stable JSON at the model layer. The public `Document::from_json()` path now preserves pages and commands instead of returning an empty document.
+- **Style inheritance**: `FlowConfig.default_style` (set via `Document::default_style()`) is merged into every `Paragraph` and `RichParagraph` (including each of its spans) via `merge_styles()` in `flow.rs`: unset fields (empty font, zero size, default black color, default left alignment) fall back to the document default; explicitly-set fields win. `test_paragraph_inherits_flow_default_style` and `test_rich_paragraph_inherits_flow_default_style` in `crates/perfect-print-layout/src/flow.rs` assert the merged font/size/color reach the rendered `DrawCommand::Text` runs, not just that layout succeeds.
 
 - Hyphenation (requires a hyphenation dictionary)
-- Fuzz testing (requires `cargo-fuzz` setup)
 - Windows/Linux backends (requires platform-specific work)
 - Tauri/egui/iced integrations (requires GUI framework knowledge)
 - Barcodes/QR codes (separate feature)
 - WASM target (requires `wasm32` testing)
+
+## 2026-07-21: HTML/CSS compatibility + rich text/list API
+
+Implemented per `docs/superpowers/plans/2026-07-21-html-css-compatibility.md`.
+
+- **Rich-text spans** (Task 1): `ContentBlock::RichParagraph` carries mixed-style
+  `StyledSpan`s (bold/italic/underline/strikethrough/color per span, sharing one
+  baseline per line); public `RichParagraph` builder in `perfect-print`.
+- **List blocks** (Task 2): `ContentBlock::List` (`ListKind::Bulleted`/`Numbered`,
+  nested `level`); public `List` builder (`List::bulleted()/numbered()`, `.item()`,
+  `.rich_item()`, `.nested()`).
+- **Style inheritance** (Task 3): already wired and verified — see item 6 above
+  (`FlowConfig.default_style` merges into `Paragraph`/`RichParagraph`).
+- **CSS subset parser** (`perfect-print-html::css`, `::stylesheet`, Task 4):
+  hand-rolled declaration/length/color parsing, selector cascade with
+  id > class > tag specificity, `@page` extraction.
+- **HTML/CSS pipeline** (`perfect-print-html::convert`, Task 5): `scraper`-based
+  DOM walk with cascade resolution, lowering into the same `ContentBlock`s the
+  native `Document` builder produces — no second rendering path.
+- **`HtmlDocument::render()`** (Task 6): validate → parse/cascade/convert → flow
+  layout → `DocumentModel`, with `HtmlRenderResult::to_pdf_bytes()`/`save_pdf()`/
+  `render_png()`. Page-setup precedence: explicit `page_settings()` >
+  `@page` > letter default. Title precedence: explicit `.title()` >
+  HTML `<title>`. `ReadinessTracker` was simplified from an async
+  load/timeout model (inherited from a WebView-era design) to a plain
+  stage tracker matching the synchronous pure-Rust pipeline.
+- **CLI `render-html` subcommand** (Task 7): `perfect-print-cli render-html
+  <input.html> [--pdf] [--png-dir] [--dpi] [--base-dir] [--strict]`.
+- **Bold/italic rendering bug fix** (found while verifying Task 7's demo
+  output): `TextStyle.bold`/`.italic` were never consulted when selecting a
+  font face for shaping (`perfect-print-layout`), rasterizing
+  (`perfect-print-render`), or embedding (`perfect-print-pdf`) — every run
+  used the regular face. `perfect-print-render`'s raster font cache also
+  discarded the font-collection face index from `fontdb` and always parsed
+  face 0 (Regular) of any TrueType Collection, which was the root cause once
+  the family/weight/style query itself was fixed. All three layers now
+  select/key by family + bold + italic.
+
+New crate: `perfect-print-html` (`scraper`, `ego-tree`, `url` deps). New docs:
+`docs/html-css-support.md`. New fuzz target: `fuzz/fuzz_targets/fuzz_html_convert.rs`.
+
+- **Page margins bug fix**: `FlowLayoutEngine` laid out every block in
+  content-area-relative coordinates (x/y start at 0 inside the margins), but
+  `build_document()` only stored `page.margins` as metadata — neither the
+  raster renderer nor the PDF backend ever read it, so every flow-laid-out
+  document (including all HTML/`@page { margin: ... }` output) rendered flush
+  against the top-left page corner regardless of configured margins.
+  `build_document()` now translates every emitted `DrawCommand` (added
+  `DrawCommand::translated()`/`Point::translated()`/`Rect::translated()`/
+  `PathOp::translated()` in `perfect-print-core`) by `(margins.left,
+  margins.top)`, so the canonical `DocumentModel` carries page-absolute
+  coordinates that every backend can consume directly.
+  `ContentBlock::Commands` blocks (e.g. the HTML `<hr>` rule in
+  `perfect-print-html::convert`) are authored in the same content-relative
+  space as everything else, so they're translated identically — verified by
+  `test_commands_block_is_offset_by_margins` alongside
+  `test_layout_offsets_content_by_margins` and
+  `test_zero_margins_content_at_origin` in `crates/perfect-print-layout/src/flow.rs`.

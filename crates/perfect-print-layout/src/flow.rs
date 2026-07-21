@@ -14,11 +14,47 @@ use perfect_print_core::units::{Point, Rect};
 
 use crate::paragraph::{Line, ParagraphEngine};
 
+/// A run of text with a single style, used inside `RichParagraph`.
+#[derive(Debug, Clone)]
+pub struct StyledSpan {
+    pub text: String,
+    pub style: TextStyle,
+}
+
+/// The marker style for a `ContentBlock::List`.
+#[derive(Debug, Clone)]
+pub enum ListKind {
+    Bulleted,
+    Numbered,
+}
+
+/// One item within a `ContentBlock::List`.
+#[derive(Debug, Clone)]
+pub struct ListItem {
+    pub spans: Vec<StyledSpan>,
+    /// Nesting depth, 0-based. Each level indents 18pt further.
+    pub level: usize,
+}
+
 /// A block of content to be laid out in the flow.
 #[derive(Debug, Clone)]
 pub enum ContentBlock {
     /// A paragraph of text.
     Paragraph { text: String, style: TextStyle },
+    /// A paragraph with mixed inline styles.
+    RichParagraph {
+        spans: Vec<StyledSpan>,
+        /// Alignment, line-height, and paragraph-level defaults come from here.
+        base_style: TextStyle,
+        /// Left indent in points (used by list items; 0 for plain rich paragraphs).
+        indent_left: f64,
+    },
+    /// A bulleted or numbered list.
+    List {
+        items: Vec<ListItem>,
+        kind: ListKind,
+        style: TextStyle,
+    },
     /// A table.
     Table {
         columns: Vec<crate::table::Column>,
@@ -110,11 +146,16 @@ impl FlowLayoutEngine {
         let page_height = content_rect.height;
         let content_width = content_rect.width;
 
+        // Lists are lowered into RichParagraphs (with a marker span and left
+        // indent) before pagination, so the rest of the loop only has to
+        // handle one "rich text" shape.
+        let expanded = expand_lists(blocks);
+
         let mut all_pages: Vec<Vec<PositionedBlock>> = vec![vec![]];
         let mut current_y: f64 = 0.0;
         let mut page_idx: usize = 0;
 
-        for block in blocks {
+        for block in &expanded {
             match block {
                 ContentBlock::PageBreak => {
                     page_idx += 1;
@@ -289,6 +330,140 @@ impl FlowLayoutEngine {
                     });
                     current_y += height;
                 }
+                ContentBlock::RichParagraph {
+                    spans,
+                    base_style,
+                    indent_left,
+                } => {
+                    let merged_base = match &self.config.default_style {
+                        Some(default) => merge_styles(default, base_style),
+                        None => base_style.clone(),
+                    };
+                    // Each span's own style inherits from the document default
+                    // the same way a plain Paragraph's style does — unset
+                    // fields (empty font, zero size, default black/left) fall
+                    // back to `default_style`.
+                    let span_pairs: Vec<(String, TextStyle)> = spans
+                        .iter()
+                        .map(|s| {
+                            let style = match &self.config.default_style {
+                                Some(default) => merge_styles(default, &s.style),
+                                None => s.style.clone(),
+                            };
+                            (s.text.clone(), style)
+                        })
+                        .collect();
+                    let avail_width = (content_width - indent_left).max(1.0);
+                    let rows = self
+                        .paragraph_engine
+                        .layout_spans_fragmented(&span_pairs, avail_width);
+
+                    if rows.is_empty() {
+                        continue;
+                    }
+
+                    // Row height/baseline is the max across that row's fragments,
+                    // so mixed-style text on one line shares a baseline.
+                    let row_metrics: Vec<(f64, f64)> = rows
+                        .iter()
+                        .map(|frags| {
+                            let height = frags.iter().map(|f| f.height).fold(0.0_f64, f64::max);
+                            let baseline =
+                                frags.iter().map(|f| f.baseline_y).fold(0.0_f64, f64::max);
+                            (height, baseline)
+                        })
+                        .collect();
+
+                    let row_width: f64 = rows
+                        .last()
+                        .and_then(|frags| frags.last())
+                        .and_then(|f| f.glyphs.last())
+                        .map(|g| g.x + g.advance)
+                        .unwrap_or(0.0);
+                    let align_offset = match merged_base.align {
+                        TextAlign::Left => 0.0,
+                        TextAlign::Right => (avail_width - row_width).max(0.0),
+                        TextAlign::Center => ((avail_width - row_width) / 2.0).max(0.0),
+                        TextAlign::Justified => 0.0,
+                    };
+                    let extra_x = indent_left + align_offset;
+
+                    let total_rows = rows.len();
+                    let para_height: f64 = row_metrics.iter().map(|(h, _)| h).sum();
+
+                    if current_y + para_height <= page_height {
+                        for (row, (height, baseline)) in rows.iter().zip(row_metrics.iter()) {
+                            let commands: Vec<DrawCommand> = row
+                                .iter()
+                                .map(|frag| {
+                                    fragment_to_draw_command(frag, current_y, *baseline, extra_x)
+                                })
+                                .collect();
+                            all_pages[page_idx].push(PositionedBlock {
+                                y: current_y,
+                                commands,
+                                height: *height,
+                            });
+                            current_y += height;
+                        }
+                    } else if self.config.break_inside_paragraphs
+                        && total_rows > self.config.widow_lines
+                    {
+                        for (i, (row, (height, baseline))) in
+                            rows.iter().zip(row_metrics.iter()).enumerate()
+                        {
+                            if current_y + height > page_height {
+                                let rows_after = total_rows - i;
+                                if rows_after < self.config.widow_lines
+                                    && all_pages[page_idx].len() > 1
+                                {
+                                    if rows_after >= self.config.orphan_lines {
+                                        page_idx += 1;
+                                        all_pages.push(vec![]);
+                                        current_y = 0.0;
+                                    }
+                                } else {
+                                    page_idx += 1;
+                                    all_pages.push(vec![]);
+                                    current_y = 0.0;
+                                }
+                            }
+
+                            let commands: Vec<DrawCommand> = row
+                                .iter()
+                                .map(|frag| {
+                                    fragment_to_draw_command(frag, current_y, *baseline, extra_x)
+                                })
+                                .collect();
+                            all_pages[page_idx].push(PositionedBlock {
+                                y: current_y,
+                                commands,
+                                height: *height,
+                            });
+                            current_y += height;
+                        }
+                    } else {
+                        if current_y > 0.0 {
+                            page_idx += 1;
+                            all_pages.push(vec![]);
+                            current_y = 0.0;
+                        }
+                        for (row, (height, baseline)) in rows.iter().zip(row_metrics.iter()) {
+                            let commands: Vec<DrawCommand> = row
+                                .iter()
+                                .map(|frag| {
+                                    fragment_to_draw_command(frag, current_y, *baseline, extra_x)
+                                })
+                                .collect();
+                            all_pages[page_idx].push(PositionedBlock {
+                                y: current_y,
+                                commands,
+                                height: *height,
+                            });
+                            current_y += height;
+                        }
+                    }
+                }
                 _ => {}
             }
         }
@@ -326,10 +501,21 @@ impl FlowLayoutEngine {
             let mut page = Page::new(page_size);
             page.margins = self.config.margins;
 
+            // `layout()` positions everything in content-area-relative
+            // coordinates (x/y start at 0 inside the margins). Neither the
+            // raster nor the PDF backend applies page margins itself, so the
+            // canonical `DocumentModel` must carry page-absolute coordinates
+            // here — translate every command by (margins.left, margins.top).
+            // `ContentBlock::Commands` blocks (e.g. the HTML `<hr>` rule) are
+            // authored in that same content-relative space, not already
+            // page-absolute, so they're translated identically; see
+            // `test_commands_block_is_offset_by_margins`.
             let mut layer = Layer::foreground();
             for block in page_blocks {
                 for cmd in &block.commands {
-                    layer.commands.push(cmd.clone());
+                    layer.commands.push(
+                        cmd.translated(self.config.margins.left, self.config.margins.top),
+                    );
                 }
             }
             page.layers.push(layer);
@@ -352,6 +538,79 @@ impl FlowLayoutEngine {
             size.width - self.config.margins.left - self.config.margins.right,
             size.height - self.config.margins.top - self.config.margins.bottom,
         )
+    }
+}
+
+/// Expand `ContentBlock::List` blocks into a sequence of `RichParagraph`
+/// blocks (marker span + item spans, indented per nesting level), leaving
+/// every other block untouched. Numbered lists number level-0 items
+/// sequentially; descending into a deeper level restarts that level's count.
+fn expand_lists(blocks: &[ContentBlock]) -> Vec<ContentBlock> {
+    let mut out = Vec::with_capacity(blocks.len());
+    for block in blocks {
+        match block {
+            ContentBlock::List { items, kind, style } => {
+                out.extend(expand_list_items(items, kind, style));
+            }
+            other => out.push(other.clone()),
+        }
+    }
+    out
+}
+
+fn expand_list_items(items: &[ListItem], kind: &ListKind, style: &TextStyle) -> Vec<ContentBlock> {
+    let mut counters: Vec<usize> = Vec::new();
+    let mut out = Vec::with_capacity(items.len());
+
+    for item in items {
+        let level = item.level;
+        if counters.len() <= level {
+            counters.resize(level + 1, 0);
+        } else {
+            // Coming back up (or staying at) this level: drop deeper counters
+            // so a subsequent nested run starts numbering from 1 again.
+            counters.truncate(level + 1);
+        }
+        counters[level] += 1;
+
+        let marker = match kind {
+            ListKind::Bulleted => "\u{2022} ".to_string(),
+            ListKind::Numbered => format!("{}. ", counters[level]),
+        };
+
+        let mut spans = Vec::with_capacity(item.spans.len() + 1);
+        spans.push(StyledSpan {
+            text: marker,
+            style: style.clone(),
+        });
+        spans.extend(item.spans.iter().cloned());
+
+        out.push(ContentBlock::RichParagraph {
+            spans,
+            base_style: style.clone(),
+            indent_left: 18.0 * (level as f64 + 1.0),
+        });
+    }
+
+    out
+}
+
+/// Convert a single-style line fragment (part of a RichParagraph row) into a
+/// draw command. `baseline` overrides the fragment's own baseline so mixed
+/// styles on one row share a baseline; `extra_x` (indent + alignment offset)
+/// is added to the fragment's on-page x position only — the glyphs' internal
+/// relative offsets are still computed from the fragment's own row-relative
+/// start, exactly as `line_to_draw_command` does for a plain line.
+fn fragment_to_draw_command(frag: &Line, y: f64, baseline: f64, extra_x: f64) -> DrawCommand {
+    let frag_x = frag.glyphs.first().map(|g| g.x).unwrap_or(0.0);
+    DrawCommand::Text {
+        run: TextRun {
+            text: frag.text.clone(),
+            glyphs: positioned_line_glyphs(frag, frag_x),
+            style: frag.style.clone(),
+        },
+        position: Point::new(frag_x + extra_x, y + baseline),
+        max_width: Some(frag.width),
     }
 }
 
@@ -431,6 +690,119 @@ mod tests {
 
     fn test_style() -> TextStyle {
         TextStyle::new(FontRef::new("Helvetica"), 12.0)
+    }
+
+    /// `FlowLayoutEngine::layout()` internally lays out content starting at
+    /// (0,0) in content-area-relative coordinates. `build_document()` must
+    /// translate every emitted `DrawCommand` by the configured margins so the
+    /// canonical `DocumentModel` holds page-absolute coordinates — neither
+    /// the raster nor the PDF backend applies margins itself.
+    #[test]
+    fn test_layout_offsets_content_by_margins() {
+        let config = FlowConfig {
+            page_size: PageSize::Letter,
+            margins: Margins::all(72.0),
+            ..Default::default()
+        };
+
+        let mut engine = FlowLayoutEngine::new(config);
+        let blocks = vec![ContentBlock::paragraph("Hello World", test_style())];
+        let doc = engine.layout(&blocks);
+
+        let position = doc
+            .pages
+            .iter()
+            .flat_map(|p| p.layers.iter())
+            .flat_map(|l| l.commands.iter())
+            .find_map(|c| match c {
+                DrawCommand::Text { position, .. } => Some(*position),
+                _ => None,
+            })
+            .expect("expected a text run");
+
+        assert!(
+            position.x >= 72.0,
+            "text x should be offset by the left margin, got {}",
+            position.x
+        );
+        assert!(
+            position.y >= 72.0,
+            "text y should be offset by the top margin, got {}",
+            position.y
+        );
+    }
+
+    /// With zero margins, content-area-relative and page-absolute coordinates
+    /// coincide, so content should still start at the page origin.
+    #[test]
+    fn test_zero_margins_content_at_origin() {
+        let config = FlowConfig {
+            page_size: PageSize::Letter,
+            margins: Margins::all(0.0),
+            ..Default::default()
+        };
+
+        let mut engine = FlowLayoutEngine::new(config);
+        let blocks = vec![ContentBlock::paragraph("Hello World", test_style())];
+        let doc = engine.layout(&blocks);
+
+        let position = doc
+            .pages
+            .iter()
+            .flat_map(|p| p.layers.iter())
+            .flat_map(|l| l.commands.iter())
+            .find_map(|c| match c {
+                DrawCommand::Text { position, .. } => Some(*position),
+                _ => None,
+            })
+            .expect("expected a text run");
+
+        assert_eq!(
+            position.x, 0.0,
+            "with zero margins, x should be unchanged from content-relative"
+        );
+        // y additionally carries the line's baseline offset even at y=0 margin,
+        // so just check it's not additionally offset by a margin (it would be
+        // >= 72.0 if the default margin were mistakenly applied).
+        assert!(
+            position.y < 72.0,
+            "with zero margins, y should not carry a leftover default margin offset, got {}",
+            position.y
+        );
+    }
+
+    /// A `ContentBlock::Commands` block (e.g. the HTML `<hr>` rule) is
+    /// authored in the same content-area-relative coordinate space as every
+    /// other block — not already page-absolute — so it must be translated by
+    /// the margins too, exactly like text/table content.
+    #[test]
+    fn test_commands_block_is_offset_by_margins() {
+        let config = FlowConfig {
+            page_size: PageSize::Letter,
+            margins: Margins::all(72.0),
+            ..Default::default()
+        };
+
+        let mut engine = FlowLayoutEngine::new(config);
+        let blocks = vec![ContentBlock::Commands(vec![DrawCommand::FillRect {
+            rect: perfect_print_core::units::Rect::new(0.0, 0.0, 100.0, 1.0),
+            color: Color::black(),
+        }])];
+        let doc = engine.layout(&blocks);
+
+        let rect = doc
+            .pages
+            .iter()
+            .flat_map(|p| p.layers.iter())
+            .flat_map(|l| l.commands.iter())
+            .find_map(|c| match c {
+                DrawCommand::FillRect { rect, .. } => Some(*rect),
+                _ => None,
+            })
+            .expect("expected a FillRect command");
+
+        assert_eq!(rect.x, 72.0, "Commands block x should be offset by margin");
+        assert_eq!(rect.y, 72.0, "Commands block y should be offset by margin");
     }
 
     #[test]
@@ -627,6 +999,134 @@ mod tests {
     }
 
     #[test]
+    fn test_rich_paragraph_layout_produces_runs_per_span() {
+        let base = TextStyle::new(FontRef::new("Helvetica"), 12.0);
+        let mut bold = base.clone();
+        bold.bold = true;
+        let block = ContentBlock::RichParagraph {
+            spans: vec![
+                StyledSpan {
+                    text: "Hello ".into(),
+                    style: base.clone(),
+                },
+                StyledSpan {
+                    text: "world".into(),
+                    style: bold,
+                },
+            ],
+            base_style: base,
+            indent_left: 0.0,
+        };
+        let mut engine = FlowLayoutEngine::new(FlowConfig::default());
+        let model = engine.layout(&[block]);
+        // Both spans appear, bold span carries bold=true, and the bold run
+        // starts to the right of the plain run on the same baseline.
+        let texts: Vec<(&TextRun, f64)> = model
+            .pages
+            .iter()
+            .flat_map(|p| p.layers.iter())
+            .flat_map(|l| l.commands.iter())
+            .filter_map(|c| match c {
+                DrawCommand::Text { run, position, .. } => Some((run, position.x)),
+                _ => None,
+            })
+            .collect();
+        let plain = texts
+            .iter()
+            .find(|(r, _)| r.text.contains("Hello") && !r.style.bold);
+        let bold = texts
+            .iter()
+            .find(|(r, _)| r.text.contains("world") && r.style.bold);
+        assert!(plain.is_some(), "expected a non-bold run containing Hello");
+        assert!(bold.is_some(), "expected a bold run containing world");
+        assert!(
+            bold.unwrap().1 > plain.unwrap().1,
+            "bold run should start to the right of the plain run"
+        );
+    }
+
+    #[test]
+    fn test_bulleted_list_indents_and_prefixes() {
+        let style = TextStyle::new(FontRef::new("Helvetica"), 12.0);
+        let block = ContentBlock::List {
+            items: vec![
+                ListItem {
+                    spans: vec![StyledSpan {
+                        text: "First".into(),
+                        style: style.clone(),
+                    }],
+                    level: 0,
+                },
+                ListItem {
+                    spans: vec![StyledSpan {
+                        text: "Second".into(),
+                        style: style.clone(),
+                    }],
+                    level: 0,
+                },
+            ],
+            kind: ListKind::Bulleted,
+            style: style.clone(),
+        };
+        let mut engine = FlowLayoutEngine::new(FlowConfig::default());
+        let model = engine.layout(&[block]);
+        let text: String = model
+            .pages
+            .iter()
+            .flat_map(|p| p.layers.iter())
+            .flat_map(|l| l.commands.iter())
+            .filter_map(|c| match c {
+                DrawCommand::Text { run, .. } => Some(run.text.clone()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join(" ");
+        assert!(text.contains("First") && text.contains("Second"));
+        // Bullet markers present:
+        assert!(text.contains('\u{2022}'));
+    }
+
+    #[test]
+    fn test_numbered_list_prefixes_sequentially() {
+        let style = TextStyle::new(FontRef::new("Helvetica"), 12.0);
+        let block = ContentBlock::List {
+            items: vec![
+                ListItem {
+                    spans: vec![StyledSpan {
+                        text: "Alpha".into(),
+                        style: style.clone(),
+                    }],
+                    level: 0,
+                },
+                ListItem {
+                    spans: vec![StyledSpan {
+                        text: "Beta".into(),
+                        style: style.clone(),
+                    }],
+                    level: 0,
+                },
+            ],
+            kind: ListKind::Numbered,
+            style: style.clone(),
+        };
+        let mut engine = FlowLayoutEngine::new(FlowConfig::default());
+        let model = engine.layout(&[block]);
+        let text: String = model
+            .pages
+            .iter()
+            .flat_map(|p| p.layers.iter())
+            .flat_map(|l| l.commands.iter())
+            .filter_map(|c| match c {
+                DrawCommand::Text { run, .. } => Some(run.text.clone()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join(" ");
+        assert!(text.contains("1."));
+        assert!(text.contains("2."));
+    }
+
+    #[test]
     fn test_style_inheritance() {
         use perfect_print_core::font::FontRef;
 
@@ -654,6 +1154,101 @@ mod tests {
         let doc = engine.layout(&blocks);
         assert!(doc.page_count() >= 1);
         // The document should have been laid out successfully with inherited styles
+    }
+
+    /// Proves (not just exercises) style inheritance end-to-end: a paragraph
+    /// built with the "unset" TextStyle that the public `Document`/`Paragraph`
+    /// API never actually produces on its own (empty font, zero size, default
+    /// black color, default left alignment) still resolves to the document's
+    /// `default_style` on the rendered `DrawCommand::Text` runs.
+    ///
+    /// See `docs/IMPROVEMENT-PLAN.md` item 6 — this closes it out as Done:
+    /// `FlowConfig.default_style` + `merge_styles` (used by both the
+    /// `Paragraph` and `RichParagraph` arms of `FlowLayoutEngine::layout`) is
+    /// the real wiring; `Document::default_style()` just sets that field.
+    #[test]
+    fn test_paragraph_inherits_flow_default_style() {
+        use perfect_print_core::font::FontRef;
+
+        let mut default = TextStyle::new(FontRef::new("Times New Roman"), 14.0);
+        default.color = Color::rgb(1.0, 0.0, 0.0);
+        default.align = TextAlign::Center;
+
+        let config = FlowConfig {
+            page_size: PageSize::Letter,
+            margins: Margins::all(72.0),
+            default_style: Some(default.clone()),
+            ..Default::default()
+        };
+
+        // An "unset" paragraph style: empty font name, zero size, default
+        // black color, default left alignment — every field merge_styles
+        // treats as "fall back to the document default".
+        let unset_style = TextStyle::new(FontRef::new(""), 0.0);
+
+        let mut engine = FlowLayoutEngine::new(config);
+        let blocks = vec![ContentBlock::paragraph("Hello", unset_style)];
+        let doc = engine.layout(&blocks);
+
+        let run = doc
+            .pages
+            .iter()
+            .flat_map(|p| p.layers.iter())
+            .flat_map(|l| l.commands.iter())
+            .find_map(|c| match c {
+                DrawCommand::Text { run, .. } => Some(run),
+                _ => None,
+            })
+            .expect("expected a text run");
+
+        assert_eq!(run.style.font, default.font, "font should be inherited");
+        assert_eq!(run.style.size, default.size, "size should be inherited");
+        assert_eq!(run.style.color, default.color, "color should be inherited");
+        assert_eq!(run.style.align, default.align, "align should be inherited");
+    }
+
+    /// Same contract, but through the `RichParagraph` path added alongside
+    /// mixed-style spans: `base_style` merges with the document default too.
+    #[test]
+    fn test_rich_paragraph_inherits_flow_default_style() {
+        use perfect_print_core::font::FontRef;
+
+        let mut default = TextStyle::new(FontRef::new("Times New Roman"), 14.0);
+        default.color = Color::rgb(0.0, 0.0, 1.0);
+
+        let config = FlowConfig {
+            page_size: PageSize::Letter,
+            margins: Margins::all(72.0),
+            default_style: Some(default.clone()),
+            ..Default::default()
+        };
+
+        let unset_style = TextStyle::new(FontRef::new(""), 0.0);
+        let block = ContentBlock::RichParagraph {
+            spans: vec![StyledSpan {
+                text: "Hello".into(),
+                style: unset_style.clone(),
+            }],
+            base_style: unset_style,
+            indent_left: 0.0,
+        };
+
+        let mut engine = FlowLayoutEngine::new(config);
+        let doc = engine.layout(&[block]);
+
+        let run = doc
+            .pages
+            .iter()
+            .flat_map(|p| p.layers.iter())
+            .flat_map(|l| l.commands.iter())
+            .find_map(|c| match c {
+                DrawCommand::Text { run, .. } => Some(run),
+                _ => None,
+            })
+            .expect("expected a text run");
+        assert_eq!(run.style.font, default.font, "font should be inherited");
+        assert_eq!(run.style.size, default.size, "size should be inherited");
+        assert_eq!(run.style.color, default.color, "color should be inherited");
     }
 
     // ─── Fuzz / Randomized Tests ────────────────────────────────────

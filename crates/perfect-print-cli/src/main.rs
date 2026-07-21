@@ -45,6 +45,26 @@ enum Commands {
         #[arg(long, default_value = "300")]
         dpi: f64,
     },
+    /// Render an HTML/CSS document to PDF and/or PNG (pure-Rust pipeline)
+    RenderHtml {
+        /// Path to an .html input file
+        input: PathBuf,
+        /// PDF output path
+        #[arg(long)]
+        pdf: Option<PathBuf>,
+        /// PNG output directory
+        #[arg(long)]
+        png_dir: Option<PathBuf>,
+        /// DPI for raster output
+        #[arg(long, default_value = "300")]
+        dpi: u32,
+        /// Local base directory to allow relative/local image references from
+        #[arg(long)]
+        base_dir: Option<PathBuf>,
+        /// Treat any conversion warning as a failure (exit code 1)
+        #[arg(long)]
+        strict: bool,
+    },
     /// List available printers
     Printers {
         #[command(subcommand)]
@@ -159,6 +179,64 @@ fn main() -> Result<()> {
 
             if pdf.is_none() && png_dir.is_none() {
                 eprintln!("Specify --pdf and/or --png-dir");
+            }
+        }
+        Commands::RenderHtml {
+            input,
+            pdf,
+            png_dir,
+            dpi,
+            base_dir,
+            strict,
+        } => {
+            let html = std::fs::read_to_string(&input)
+                .map_err(|e| anyhow::anyhow!("failed to read {}: {}", input.display(), e))?;
+
+            let mut policy = perfect_print_html::ResourcePolicy::offline();
+            if let Some(dir) = &base_dir {
+                policy = policy.with_local_base_directory(dir).map_err(|e| {
+                    anyhow::anyhow!("invalid --base-dir {}: {}", dir.display(), e)
+                })?;
+            }
+
+            let doc = perfect_print_html::HtmlDocument::new(html).resource_policy(policy);
+            let result = doc
+                .render()
+                .map_err(|e| anyhow::anyhow!("failed to render {}: {}", input.display(), e))?;
+
+            if let Some(ref pdf_path) = pdf {
+                let bytes = result
+                    .to_pdf_bytes()
+                    .map_err(|e| anyhow::anyhow!("failed to render PDF: {}", e))?;
+                std::fs::write(pdf_path, &bytes)?;
+                eprintln!("PDF written to {}", pdf_path.display());
+            }
+
+            if let Some(ref png_path) = png_dir {
+                let paths = result
+                    .render_png(png_path, dpi)
+                    .map_err(|e| anyhow::anyhow!("failed to render PNG: {}", e))?;
+                eprintln!("PNG pages written to {}:", png_path.display());
+                for p in &paths {
+                    eprintln!("  {}", p.display());
+                }
+            }
+
+            if pdf.is_none() && png_dir.is_none() {
+                eprintln!("Specify --pdf and/or --png-dir");
+            }
+
+            if !result.warnings.is_empty() {
+                for w in &result.warnings {
+                    eprintln!("Warning: {}", w);
+                }
+                if strict {
+                    eprintln!(
+                        "Error: {} warning(s) treated as failures in --strict mode",
+                        result.warnings.len()
+                    );
+                    std::process::exit(1);
+                }
             }
         }
         Commands::Printers { action: _, json } => {
