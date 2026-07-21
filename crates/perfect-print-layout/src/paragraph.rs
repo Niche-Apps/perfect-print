@@ -607,6 +607,163 @@ impl ParagraphEngine {
         )
     }
 
+    /// Lay out a paragraph built from styled spans, preserving per-span style
+    /// boundaries so the caller can emit one draw command per (line, span-fragment).
+    /// Line breaking is word-based across span boundaries — a wrap can happen
+    /// between words from any two (or the same) spans, exactly like a plain
+    /// paragraph. Returns one `Vec<Line>` per wrapped row; within a row, each
+    /// `Line` is a contiguous same-style fragment.
+    pub fn layout_spans_fragmented(
+        &mut self,
+        spans: &[(String, TextStyle)],
+        max_width: f64,
+    ) -> Vec<Vec<Line>> {
+        // Flatten spans into (word, style) pairs.
+        let mut words: Vec<(String, TextStyle)> = Vec::new();
+        for (text, style) in spans {
+            for w in text.split_whitespace() {
+                words.push((w.to_string(), style.clone()));
+            }
+        }
+        if words.is_empty() {
+            return Vec::new();
+        }
+
+        // Greedy word-wrap, mirroring layout_paragraph's algorithm but carrying
+        // the style alongside each word so line breaks can fall between spans.
+        let mut rows: Vec<Vec<(String, TextStyle)>> = Vec::new();
+        let mut current: Vec<(String, TextStyle)> = Vec::new();
+        let mut current_width = 0.0;
+
+        for (word, style) in words {
+            let font = match self.load_font(&style) {
+                Some(f) => f,
+                None => continue,
+            };
+            let word_width = self.shaper.measure_width(&word, style.size, &font);
+            let space_width = if current.is_empty() {
+                0.0
+            } else {
+                let prev_style = &current.last().unwrap().1;
+                self.load_font(prev_style)
+                    .map(|f| self.shaper.measure_width(" ", prev_style.size, &f))
+                    .unwrap_or(0.0)
+            };
+
+            if current_width + space_width + word_width > max_width && !current.is_empty() {
+                rows.push(std::mem::take(&mut current));
+                current_width = 0.0;
+            }
+
+            if !current.is_empty() {
+                current_width += space_width;
+            }
+            current.push((word, style));
+            current_width += word_width;
+        }
+        if !current.is_empty() {
+            rows.push(current);
+        }
+
+        rows.into_iter()
+            .map(|row| self.layout_word_run_fragments(&row))
+            .collect()
+    }
+
+    /// Position a row of styled words (as `layout_word_run` does) and split the
+    /// result into one `Line` per contiguous same-style run ("fragment").
+    /// Glyph x-positions stay row-relative (cumulative across the whole row,
+    /// starting at 0), matching the convention `layout_word_run` uses — callers
+    /// extract a fragment's x offset from its first glyph, just like a plain `Line`.
+    fn layout_word_run_fragments(&mut self, words: &[(String, TextStyle)]) -> Vec<Line> {
+        let mut fragments = Vec::new();
+        let mut positioned: Vec<PositionedGlyph> = Vec::new();
+        let mut shaped_glyphs: Vec<ShapedGlyph> = Vec::new();
+        let mut frag_words: Vec<&str> = Vec::new();
+        let mut frag_style: Option<TextStyle> = None;
+        let mut x = 0.0;
+
+        for (index, (word, style)) in words.iter().enumerate() {
+            if let Some(active) = &frag_style {
+                if active != style {
+                    // Style changed: flush the fragment built so far.
+                    let text = frag_words.join(" ");
+                    let height = active.line_height.unwrap_or(active.size * 1.2);
+                    fragments.push(Line::from_parts(
+                        text,
+                        std::mem::take(&mut positioned),
+                        std::mem::take(&mut shaped_glyphs),
+                        height,
+                        active.size,
+                        active.clone(),
+                    ));
+                    frag_words.clear();
+                }
+            }
+            frag_style = Some(style.clone());
+
+            let font = self.font_cache.get_by_family(style.font.as_ref());
+            let word_glyphs = font
+                .as_ref()
+                .map(|font| {
+                    self.shaper
+                        .shape_bidi(word, style.size, font, self.config.base_direction)
+                })
+                .unwrap_or_default();
+
+            if word_glyphs.is_empty() {
+                let fallback_width = word.len() as f64 * style.size * 0.5;
+                positioned.push(PositionedGlyph {
+                    glyph_id: 0,
+                    x,
+                    y: 0.0,
+                    advance: fallback_width,
+                    font_index: 0,
+                });
+                x += fallback_width;
+            } else {
+                let mut pen_x = x;
+                for glyph in word_glyphs {
+                    positioned.push(PositionedGlyph {
+                        glyph_id: glyph.glyph_id,
+                        x: pen_x + glyph.x_offset,
+                        y: glyph.y_offset,
+                        advance: glyph.x_advance,
+                        font_index: glyph.font_index,
+                    });
+                    pen_x += glyph.x_advance;
+                    shaped_glyphs.push(glyph);
+                }
+                x = pen_x;
+            }
+
+            frag_words.push(word.as_str());
+
+            if index + 1 < words.len() {
+                let space_w = font
+                    .as_ref()
+                    .map(|f| self.shaper.measure_width(" ", style.size, f))
+                    .unwrap_or(style.size * 0.3);
+                x += space_w;
+            }
+        }
+
+        if let Some(style) = frag_style {
+            let text = frag_words.join(" ");
+            let height = style.line_height.unwrap_or(style.size * 1.2);
+            fragments.push(Line::from_parts(
+                text,
+                positioned,
+                shaped_glyphs,
+                height,
+                style.size,
+                style,
+            ));
+        }
+
+        fragments
+    }
+
     fn load_font(&mut self, style: &TextStyle) -> Option<LoadedFont> {
         let props = FontProperties::new(style.font.as_ref());
         self.font_cache.get(&props)

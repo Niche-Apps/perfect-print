@@ -20,7 +20,9 @@ pub use perfect_print_dialog::{
     PrintError, PrintScaling, PrintSettings, PrintWarning, Printer, PrinterCapabilities,
     PrinterState,
 };
-pub use perfect_print_layout::flow::{ContentBlock, FlowConfig, FlowLayoutEngine, PositionedBlock};
+pub use perfect_print_layout::flow::{
+    ContentBlock, FlowConfig, FlowLayoutEngine, PositionedBlock, StyledSpan,
+};
 pub use perfect_print_layout::font_loader::{
     default_fallbacks, FallbackFont, FontCache, FontLoader, FontProperties, LoadedFont,
     SystemFontLoader,
@@ -913,6 +915,95 @@ impl TextSpan {
     }
 }
 
+// ─── RichParagraph ─────────────────────────────────────────────────────
+
+/// A paragraph mixing plain, bold, italic, and styled spans.
+#[derive(Debug, Clone)]
+pub struct RichParagraph {
+    spans: Vec<TextSpan>,
+    base: TextStyle,
+}
+
+impl RichParagraph {
+    pub fn new() -> Self {
+        Self {
+            spans: Vec::new(),
+            base: TextStyle::new(FontRef::new("Helvetica"), 12.0),
+        }
+    }
+
+    /// Append an arbitrary styled span.
+    pub fn span(mut self, span: TextSpan) -> Self {
+        self.spans.push(span);
+        self
+    }
+
+    /// Append plain text using the paragraph's base style.
+    pub fn text(mut self, s: impl Into<String>) -> Self {
+        self.spans.push(TextSpan::new(s, self.base.clone()));
+        self
+    }
+
+    /// Append bold text (base style + bold).
+    pub fn bold(mut self, s: impl Into<String>) -> Self {
+        let mut style = self.base.clone();
+        style.bold = true;
+        self.spans.push(TextSpan::new(s, style));
+        self
+    }
+
+    /// Append italic text (base style + italic).
+    pub fn italic(mut self, s: impl Into<String>) -> Self {
+        let mut style = self.base.clone();
+        style.italic = true;
+        self.spans.push(TextSpan::new(s, style));
+        self
+    }
+
+    /// Set the paragraph's alignment.
+    pub fn align(mut self, a: TextAlign) -> Self {
+        self.base.align = a;
+        self
+    }
+
+    /// Set the base font size. Also applied to any spans already added that
+    /// are still at the paragraph's previous base size (spans with an
+    /// explicitly different size are left alone).
+    pub fn font_size(mut self, size: f64) -> Self {
+        let old_base_size = self.base.size;
+        for span in &mut self.spans {
+            if span.style.size == old_base_size {
+                span.style.size = size;
+            }
+        }
+        self.base.size = size;
+        self
+    }
+}
+
+impl Default for RichParagraph {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl From<RichParagraph> for ContentBlock {
+    fn from(p: RichParagraph) -> Self {
+        ContentBlock::RichParagraph {
+            spans: p
+                .spans
+                .into_iter()
+                .map(|s| StyledSpan {
+                    text: s.text,
+                    style: s.style,
+                })
+                .collect(),
+            base_style: p.base,
+            indent_left: 0.0,
+        }
+    }
+}
+
 // ─── PageNumber ────────────────────────────────────────────────────────
 
 /// A page number variable for use in headers and footers.
@@ -1045,6 +1136,14 @@ fn extract_text_from_blocks(blocks: &[ContentBlock]) -> String {
                 }
                 result.push_str(text);
             }
+            ContentBlock::RichParagraph { spans, .. } => {
+                for span in spans {
+                    if !result.is_empty() {
+                        result.push(' ');
+                    }
+                    result.push_str(&span.text);
+                }
+            }
             ContentBlock::Table { rows, .. } => {
                 for row in rows {
                     for cell in &row.cells {
@@ -1142,6 +1241,43 @@ mod tests {
             _ => panic!("Expected Paragraph"),
         }
     }
+
+    #[test]
+    fn test_rich_paragraph_builds_document() {
+        let doc = Document::new().add(
+            RichParagraph::new()
+                .text("Hello ")
+                .bold("world"),
+        );
+        let model = doc.build();
+        assert_eq!(model.page_count(), 1);
+    }
+
+    #[test]
+    fn test_rich_paragraph_text_content_has_both_spans() {
+        let doc = Document::new().add(
+            RichParagraph::new()
+                .text("Hello ")
+                .bold("world"),
+        );
+        let content = doc.text_content();
+        assert!(content.contains("Hello"));
+        assert!(content.contains("world"));
+    }
+
+    #[test]
+    fn test_rich_paragraph_into_content_block() {
+        let block: ContentBlock = RichParagraph::new().text("a").bold("b").into();
+        match block {
+            ContentBlock::RichParagraph { spans, .. } => {
+                assert_eq!(spans.len(), 2);
+                assert!(!spans[0].style.bold);
+                assert!(spans[1].style.bold);
+            }
+            _ => panic!("Expected RichParagraph"),
+        }
+    }
+
 
     #[test]
     fn test_gap_into_content_block() {

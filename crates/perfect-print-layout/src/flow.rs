@@ -14,11 +14,26 @@ use perfect_print_core::units::{Point, Rect};
 
 use crate::paragraph::{Line, ParagraphEngine};
 
+/// A run of text with a single style, used inside `RichParagraph`.
+#[derive(Debug, Clone)]
+pub struct StyledSpan {
+    pub text: String,
+    pub style: TextStyle,
+}
+
 /// A block of content to be laid out in the flow.
 #[derive(Debug, Clone)]
 pub enum ContentBlock {
     /// A paragraph of text.
     Paragraph { text: String, style: TextStyle },
+    /// A paragraph with mixed inline styles.
+    RichParagraph {
+        spans: Vec<StyledSpan>,
+        /// Alignment, line-height, and paragraph-level defaults come from here.
+        base_style: TextStyle,
+        /// Left indent in points (used by list items; 0 for plain rich paragraphs).
+        indent_left: f64,
+    },
     /// A table.
     Table {
         columns: Vec<crate::table::Column>,
@@ -289,6 +304,130 @@ impl FlowLayoutEngine {
                     });
                     current_y += height;
                 }
+                ContentBlock::RichParagraph {
+                    spans,
+                    base_style,
+                    indent_left,
+                } => {
+                    let merged_base = match &self.config.default_style {
+                        Some(default) => merge_styles(default, base_style),
+                        None => base_style.clone(),
+                    };
+                    let span_pairs: Vec<(String, TextStyle)> = spans
+                        .iter()
+                        .map(|s| (s.text.clone(), s.style.clone()))
+                        .collect();
+                    let avail_width = (content_width - indent_left).max(1.0);
+                    let rows = self
+                        .paragraph_engine
+                        .layout_spans_fragmented(&span_pairs, avail_width);
+
+                    if rows.is_empty() {
+                        continue;
+                    }
+
+                    // Row height/baseline is the max across that row's fragments,
+                    // so mixed-style text on one line shares a baseline.
+                    let row_metrics: Vec<(f64, f64)> = rows
+                        .iter()
+                        .map(|frags| {
+                            let height = frags.iter().map(|f| f.height).fold(0.0_f64, f64::max);
+                            let baseline =
+                                frags.iter().map(|f| f.baseline_y).fold(0.0_f64, f64::max);
+                            (height, baseline)
+                        })
+                        .collect();
+
+                    let row_width: f64 = rows
+                        .last()
+                        .and_then(|frags| frags.last())
+                        .and_then(|f| f.glyphs.last())
+                        .map(|g| g.x + g.advance)
+                        .unwrap_or(0.0);
+                    let align_offset = match merged_base.align {
+                        TextAlign::Left => 0.0,
+                        TextAlign::Right => (avail_width - row_width).max(0.0),
+                        TextAlign::Center => ((avail_width - row_width) / 2.0).max(0.0),
+                        TextAlign::Justified => 0.0,
+                    };
+                    let extra_x = indent_left + align_offset;
+
+                    let total_rows = rows.len();
+                    let para_height: f64 = row_metrics.iter().map(|(h, _)| h).sum();
+
+                    if current_y + para_height <= page_height {
+                        for (row, (height, baseline)) in rows.iter().zip(row_metrics.iter()) {
+                            let commands: Vec<DrawCommand> = row
+                                .iter()
+                                .map(|frag| {
+                                    fragment_to_draw_command(frag, current_y, *baseline, extra_x)
+                                })
+                                .collect();
+                            all_pages[page_idx].push(PositionedBlock {
+                                y: current_y,
+                                commands,
+                                height: *height,
+                            });
+                            current_y += height;
+                        }
+                    } else if self.config.break_inside_paragraphs
+                        && total_rows > self.config.widow_lines
+                    {
+                        for (i, (row, (height, baseline))) in
+                            rows.iter().zip(row_metrics.iter()).enumerate()
+                        {
+                            if current_y + height > page_height {
+                                let rows_after = total_rows - i;
+                                if rows_after < self.config.widow_lines
+                                    && all_pages[page_idx].len() > 1
+                                {
+                                    if rows_after >= self.config.orphan_lines {
+                                        page_idx += 1;
+                                        all_pages.push(vec![]);
+                                        current_y = 0.0;
+                                    }
+                                } else {
+                                    page_idx += 1;
+                                    all_pages.push(vec![]);
+                                    current_y = 0.0;
+                                }
+                            }
+
+                            let commands: Vec<DrawCommand> = row
+                                .iter()
+                                .map(|frag| {
+                                    fragment_to_draw_command(frag, current_y, *baseline, extra_x)
+                                })
+                                .collect();
+                            all_pages[page_idx].push(PositionedBlock {
+                                y: current_y,
+                                commands,
+                                height: *height,
+                            });
+                            current_y += height;
+                        }
+                    } else {
+                        if current_y > 0.0 {
+                            page_idx += 1;
+                            all_pages.push(vec![]);
+                            current_y = 0.0;
+                        }
+                        for (row, (height, baseline)) in rows.iter().zip(row_metrics.iter()) {
+                            let commands: Vec<DrawCommand> = row
+                                .iter()
+                                .map(|frag| {
+                                    fragment_to_draw_command(frag, current_y, *baseline, extra_x)
+                                })
+                                .collect();
+                            all_pages[page_idx].push(PositionedBlock {
+                                y: current_y,
+                                commands,
+                                height: *height,
+                            });
+                            current_y += height;
+                        }
+                    }
+                }
                 _ => {}
             }
         }
@@ -352,6 +491,25 @@ impl FlowLayoutEngine {
             size.width - self.config.margins.left - self.config.margins.right,
             size.height - self.config.margins.top - self.config.margins.bottom,
         )
+    }
+}
+
+/// Convert a single-style line fragment (part of a RichParagraph row) into a
+/// draw command. `baseline` overrides the fragment's own baseline so mixed
+/// styles on one row share a baseline; `extra_x` (indent + alignment offset)
+/// is added to the fragment's on-page x position only — the glyphs' internal
+/// relative offsets are still computed from the fragment's own row-relative
+/// start, exactly as `line_to_draw_command` does for a plain line.
+fn fragment_to_draw_command(frag: &Line, y: f64, baseline: f64, extra_x: f64) -> DrawCommand {
+    let frag_x = frag.glyphs.first().map(|g| g.x).unwrap_or(0.0);
+    DrawCommand::Text {
+        run: TextRun {
+            text: frag.text.clone(),
+            glyphs: positioned_line_glyphs(frag, frag_x),
+            style: frag.style.clone(),
+        },
+        position: Point::new(frag_x + extra_x, y + baseline),
+        max_width: Some(frag.width),
     }
 }
 
@@ -624,6 +782,53 @@ mod tests {
 
         let doc = engine.layout(&blocks);
         assert!(doc.page_count() >= 1);
+    }
+
+    #[test]
+    fn test_rich_paragraph_layout_produces_runs_per_span() {
+        let base = TextStyle::new(FontRef::new("Helvetica"), 12.0);
+        let mut bold = base.clone();
+        bold.bold = true;
+        let block = ContentBlock::RichParagraph {
+            spans: vec![
+                StyledSpan {
+                    text: "Hello ".into(),
+                    style: base.clone(),
+                },
+                StyledSpan {
+                    text: "world".into(),
+                    style: bold,
+                },
+            ],
+            base_style: base,
+            indent_left: 0.0,
+        };
+        let mut engine = FlowLayoutEngine::new(FlowConfig::default());
+        let model = engine.layout(&[block]);
+        // Both spans appear, bold span carries bold=true, and the bold run
+        // starts to the right of the plain run on the same baseline.
+        let texts: Vec<(&TextRun, f64)> = model
+            .pages
+            .iter()
+            .flat_map(|p| p.layers.iter())
+            .flat_map(|l| l.commands.iter())
+            .filter_map(|c| match c {
+                DrawCommand::Text { run, position, .. } => Some((run, position.x)),
+                _ => None,
+            })
+            .collect();
+        let plain = texts
+            .iter()
+            .find(|(r, _)| r.text.contains("Hello") && !r.style.bold);
+        let bold = texts
+            .iter()
+            .find(|(r, _)| r.text.contains("world") && r.style.bold);
+        assert!(plain.is_some(), "expected a non-bold run containing Hello");
+        assert!(bold.is_some(), "expected a bold run containing world");
+        assert!(
+            bold.unwrap().1 > plain.unwrap().1,
+            "bold run should start to the right of the plain run"
+        );
     }
 
     #[test]
