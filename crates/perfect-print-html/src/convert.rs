@@ -153,6 +153,17 @@ fn ua_stylesheet() -> Stylesheet {
     )
 }
 
+/// CSS `position` values we act on. `Absolute` takes the element out of the
+/// normal flow and onto a `ContentBlock::Positioned`; `Relative` is accepted
+/// as a flow-preserving no-op (it just establishes a coordinate origin,
+/// which is already the page/content origin in this renderer). Anything
+/// else (`fixed`, `sticky`, ...) is unsupported and warns.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PositionMode {
+    Absolute,
+    Relative,
+}
+
 /// Non-inherited per-element CSS effects (margins, breaks, table styling).
 #[derive(Debug, Clone, Default)]
 struct ElementProps {
@@ -162,6 +173,10 @@ struct ElementProps {
     page_break_after: bool,
     background_color: Option<Color>,
     padding: Option<f64>,
+    position: Option<PositionMode>,
+    left: Option<f64>,
+    top: Option<f64>,
+    explicit_width: Option<f64>,
 }
 
 fn parse_font_weight(value: &str) -> Option<bool> {
@@ -290,6 +305,27 @@ fn apply_declarations(
                     props.page_break_after = true;
                 }
             }
+            "position" => {
+                let v = d.value.trim().to_ascii_lowercase();
+                match v.as_str() {
+                    "absolute" => props.position = Some(PositionMode::Absolute),
+                    "relative" => props.position = Some(PositionMode::Relative),
+                    "static" => props.position = None,
+                    _ => warnings.push(format!("unsupported position: {}", d.value)),
+                }
+            }
+            "left" => match parse_length(&d.value, style.size) {
+                Some(l) => props.left = Some(l),
+                None => warnings.push(format!("unsupported left: {}", d.value)),
+            },
+            "top" => match parse_length(&d.value, style.size) {
+                Some(t) => props.top = Some(t),
+                None => warnings.push(format!("unsupported top: {}", d.value)),
+            },
+            "width" => match parse_length(&d.value, style.size) {
+                Some(w) => props.explicit_width = Some(w),
+                None => warnings.push(format!("unsupported width: {}", d.value)),
+            },
             other => warnings.push(format!("unsupported CSS property: {other}")),
         }
     }
@@ -530,9 +566,13 @@ impl Converter {
                 }
                 "div" | "body" | "html" => {
                     let (el_style, props) = self.resolve(el, style);
-                    self.open_block(&props);
-                    self.walk_container(el, &el_style, indent);
-                    self.close_block(&props, el_style.size * 0.5);
+                    if props.position == Some(PositionMode::Absolute) {
+                        self.emit_positioned(el, &el_style, &props);
+                    } else {
+                        self.open_block(&props);
+                        self.walk_container(el, &el_style, indent);
+                        self.close_block(&props, el_style.size * 0.5);
+                    }
                 }
                 other => {
                     self.warnings
@@ -562,6 +602,42 @@ impl Converter {
         if props.page_break_after {
             self.blocks.push(ContentBlock::PageBreak);
         }
+    }
+
+    /// `position: absolute` element: converted to a `ContentBlock::Positioned`
+    /// instead of participating in the normal block flow. Children convert
+    /// recursively as normal blocks, but into their own isolated block list
+    /// (starting a fresh coordinate frame at the positioned box's origin) —
+    /// the flow's gap/margin bookkeeping (`pending_gap`, `has_content`) is
+    /// saved and restored around the recursion so the positioned element is
+    /// completely invisible to the surrounding flow, matching CSS taking it
+    /// out of flow.
+    fn emit_positioned(&mut self, el: ElementRef, style: &TextStyle, props: &ElementProps) {
+        let x = props.left.unwrap_or(0.0);
+        let y = props.top.unwrap_or(0.0);
+        let content_width = self.content_width();
+        let width = props
+            .explicit_width
+            .unwrap_or_else(|| (content_width - x).max(1.0));
+
+        let saved_blocks = std::mem::take(&mut self.blocks);
+        let saved_pending_gap = self.pending_gap;
+        let saved_has_content = self.has_content;
+        self.pending_gap = 0.0;
+        self.has_content = false;
+
+        self.walk_container(el, style, 0.0);
+
+        let inner_blocks = std::mem::replace(&mut self.blocks, saved_blocks);
+        self.pending_gap = saved_pending_gap;
+        self.has_content = saved_has_content;
+
+        self.blocks.push(ContentBlock::Positioned {
+            x,
+            y,
+            width,
+            blocks: inner_blocks,
+        });
     }
 
     fn flush_inline_run<'a>(
@@ -1099,5 +1175,96 @@ mod tests {
         assert_eq!(decode_base64("TWFu").unwrap(), b"Man");
         assert_eq!(decode_base64("TWE=").unwrap(), b"Ma");
         assert_eq!(decode_base64("TQ==").unwrap(), b"M");
+    }
+
+    #[test]
+    fn absolute_div_becomes_positioned_block() {
+        let c = blocks_of(r#"<div style="position:absolute;left:1in;top:2in;width:3in">Hi</div>"#);
+        assert_eq!(c.blocks.len(), 1);
+        let ContentBlock::Positioned {
+            x,
+            y,
+            width,
+            blocks,
+        } = &c.blocks[0]
+        else {
+            panic!("expected Positioned, got {:?}", c.blocks[0]);
+        };
+        assert_eq!(*x, 72.0);
+        assert_eq!(*y, 144.0);
+        assert_eq!(*width, 216.0);
+        assert_eq!(blocks.len(), 1);
+        assert!(matches!(blocks[0], ContentBlock::RichParagraph { .. }));
+        assert!(
+            c.warnings.iter().all(|w| !w.contains("position")
+                && !w.contains("unsupported left")
+                && !w.contains("unsupported top")
+                && !w.contains("unsupported width")),
+            "position/left/top/width should not warn when handled, got {:?}",
+            c.warnings
+        );
+    }
+
+    #[test]
+    fn absolute_div_missing_left_top_defaults_to_zero() {
+        let c = blocks_of(r#"<div style="position:absolute;width:1in">Hi</div>"#);
+        let ContentBlock::Positioned { x, y, .. } = &c.blocks[0] else {
+            panic!("expected Positioned, got {:?}", c.blocks[0]);
+        };
+        assert_eq!(*x, 0.0);
+        assert_eq!(*y, 0.0);
+    }
+
+    #[test]
+    fn absolute_div_missing_width_uses_remaining_content_width() {
+        let c = blocks_of(r#"<div style="position:absolute;left:1in">Hi</div>"#);
+        let ContentBlock::Positioned { x, width, .. } = &c.blocks[0] else {
+            panic!("expected Positioned, got {:?}", c.blocks[0]);
+        };
+        // Letter width (612pt) minus default 72pt margins each side = 468pt
+        // content width; minus the 72pt left offset = 396pt remaining.
+        assert_eq!(*x, 72.0);
+        assert_eq!(*width, 396.0);
+    }
+
+    #[test]
+    fn template_like_document_produces_one_positioned_block_each_no_flow_order() {
+        let html = r#"
+            <div style="position:absolute;left:0.5in;top:0.5in">INVOICE</div>
+            <div style="position:absolute;left:0.5in;top:1.2in">Address</div>
+            <div style="position:absolute;left:5.5in;top:7in;width:2.5in">Total</div>
+        "#;
+        let c = blocks_of(html);
+        let positioned: Vec<_> = c
+            .blocks
+            .iter()
+            .filter(|b| matches!(b, ContentBlock::Positioned { .. }))
+            .collect();
+        assert_eq!(positioned.len(), 3, "got blocks: {:?}", c.blocks);
+        // No flow-order dependence: there should be no Gap blocks pushed as a
+        // side effect of the absolutely-positioned divs (they never touch
+        // pending_gap/has_content), and nothing but the three Positioned
+        // blocks themselves.
+        assert!(
+            c.blocks
+                .iter()
+                .all(|b| matches!(b, ContentBlock::Positioned { .. })),
+            "expected only Positioned blocks, got {:?}",
+            c.blocks
+        );
+    }
+
+    #[test]
+    fn relative_position_is_silent_no_op_for_flow() {
+        let c = blocks_of(r#"<div style="position:relative"><p>x</p></div>"#);
+        assert!(
+            c.warnings.iter().all(|w| !w.contains("position")),
+            "position:relative should not warn, got {:?}",
+            c.warnings
+        );
+        assert!(!c
+            .blocks
+            .iter()
+            .any(|b| matches!(b, ContentBlock::Positioned { .. })));
     }
 }

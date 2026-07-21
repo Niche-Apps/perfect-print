@@ -22,10 +22,19 @@ safe to assert on in CI.
 metadata except `<title>`. Unknown tags are treated as `div` (block context)
 or `span` (inline context) by display default, with a warning.
 
+**CSS length units:** every property below that accepts a length accepts
+`pt` (default/bare-number unit), `px` (96dpi → points ×0.75), `em` (relative
+to the parent's resolved font size), `in` (×72), `cm` (×72/2.54), `mm`
+(×72/25.4), and `pc` (×12). `%` is parsed but not resolved (treated as
+unsupported, produces a warning). This applies uniformly to font sizes,
+margins, padding, letter-spacing, `@page { size: ... }`, and
+`left`/`top`/`width` on absolutely positioned elements — so a template
+authored entirely in inches (e.g. `@page { size: 8.5in 11in }`,
+`left: 0.5in`) resolves correctly without any pre-conversion.
+
 **CSS properties:**
 - `font-family`
-- `font-size` (`pt`, `px` at 96dpi → points ×0.75, `em` relative to parent,
-  bare number = pt)
+- `font-size` (see length units above)
 - `font-weight` (`normal`/`bold`/100–900, ≥700 is bold)
 - `font-style` (`normal`/`italic`/`oblique`)
 - `color` (`#rgb`, `#rrggbb`, `rgb(r,g,b)`, 16 named CSS colors)
@@ -40,6 +49,44 @@ or `span` (inline context) by display default, with a warning.
 - `padding` (table cells only)
 - `page-break-before: always` / `page-break-after: always`
 - `break-before: page` / `break-after: page`
+- `position` (`absolute`, `relative`; see [`position: absolute`](#position-absolute) below — other values, e.g. `fixed`/`sticky`, are unsupported and warn)
+- `left`/`top` (any supported length unit; only meaningful together with `position: absolute`)
+- `width` on `position: absolute` elements (any supported length unit; sets the positioned box's layout/wrap width)
+
+## `position: absolute`
+
+A `div` with `position: absolute` is taken out of the normal document flow
+and converted to `perfect_print_layout::flow::ContentBlock::Positioned { x,
+y, width, blocks }` instead of an ordinary block:
+
+- **`x`/`y`** come from `left`/`top` (any supported length unit), resolved
+  relative to the content-area origin (inside the page margins — the same
+  origin every other block's coordinates are relative to). Missing
+  `left`/`top` default to `0`.
+- **`width`** comes from the CSS `width` declaration; if absent it defaults
+  to the remaining content width from `x` to the right content-area edge.
+- The element's children convert recursively as normal blocks — paragraphs,
+  tables, images, lists — laid out inside that `width`, and are rendered
+  translated by `(x, y)`.
+- The positioned element does **not** advance the surrounding flow's cursor:
+  content before and after it lays out exactly as if the positioned element
+  were absent. This matches CSS's out-of-flow semantics for
+  `position: absolute`.
+- **Overflow is not clipped.** Content taller than the remaining space on
+  the page is rendered past the page edge rather than being paginated or
+  cropped — this matches real CSS `position: absolute` (which does not
+  implicitly paginate an out-of-flow element), but it does mean a
+  positioned box with `overflow: hidden` and more content than its `height`
+  will visibly overflow instead of being clipped; `height` and `overflow`
+  are still unsupported properties and produce a warning for this reason.
+- `position: relative` is accepted as a **silent no-op for flow purposes**:
+  the element stays in normal flow (open/close block, margins, walk its
+  children normally) and does not itself establish a new coordinate origin,
+  because content-area-relative coordinates already are that origin in this
+  renderer. `left`/`top` on a `position: relative` element currently have no
+  effect (they are only acted on for `position: absolute`).
+- Only `div` elements are checked for `position: absolute` today; other
+  block-level tags with `position: absolute` styling are not special-cased.
 
 **Selectors:** `tag`, `.class`, `#id`, `tag.class`, and comma lists.
 Specificity: `id` (100) > `class` (10) > `tag` (1); a later rule wins ties.

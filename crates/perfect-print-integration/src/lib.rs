@@ -454,3 +454,69 @@ fn e2e_raster_determinism() {
     let _ = std::fs::remove_dir_all(&dir1);
     let _ = std::fs::remove_dir_all(&dir2);
 }
+
+// ─── End-to-End: Shaped-glyph cluster coverage ───────────────────────
+
+/// Regression test: every character in a laid-out text run must be covered
+/// by a shaped glyph whose cluster is that character's byte offset in
+/// `run.text`. The PDF writer's TJ emission looks glyph advances up by
+/// cluster == byte-offset; when word-relative clusters leaked through
+/// (restarting at 0 for every word), later words' clusters collided with
+/// earlier byte positions and longer paragraphs came out with garbled
+/// spacing ("Hello Wor l dfrom PlainBooks...").
+#[test]
+fn e2e_flowed_paragraph_glyph_clusters_cover_run_text() {
+    use perfect_print_layout::{ContentBlock, FlowConfig, FlowLayoutEngine};
+
+    let text = "Hello World from PlainBooks. This is a test invoice line with normal spacing.";
+    let style = TextStyle::new(FontRef::new("Helvetica"), 12.0);
+    let mut engine = FlowLayoutEngine::new(FlowConfig::default());
+    // RichParagraph is what the HTML pipeline emits; it takes the per-word
+    // shaping path (`layout_word_run_fragments`) where the bug lived. Also
+    // flow a plain paragraph to cover the `layout_word_run` path.
+    let model = engine.layout(&[
+        ContentBlock::RichParagraph {
+            spans: vec![perfect_print_layout::StyledSpan {
+                text: text.to_string(),
+                style: style.clone(),
+            }],
+            base_style: style.clone(),
+            indent_left: 0.0,
+        },
+        ContentBlock::paragraph(text, style),
+    ]);
+
+    let mut runs_checked = 0;
+    for page in &model.pages {
+        for cmd in page.layers.iter().flat_map(|l| &l.commands) {
+            if let DrawCommand::Text { run, .. } = cmd {
+                runs_checked += 1;
+                let clusters: std::collections::HashSet<u32> =
+                    run.glyphs.iter().map(|g| g.cluster).collect();
+                for (byte_idx, ch) in run.text.char_indices() {
+                    if ch.is_whitespace() {
+                        continue;
+                    }
+                    assert!(
+                        clusters.contains(&(byte_idx as u32)),
+                        "char {:?} at byte {} of run text {:?} has no shaped glyph \
+                         with a matching cluster; clusters present: {:?}",
+                        ch,
+                        byte_idx,
+                        run.text,
+                        {
+                            let mut sorted: Vec<u32> = clusters.iter().copied().collect();
+                            sorted.sort();
+                            sorted
+                        }
+                    );
+                }
+            }
+        }
+    }
+    assert!(runs_checked > 0, "paragraph should produce text runs");
+
+    // The full pipeline should still produce a loadable PDF.
+    let bytes = render_to_pdf_bytes(&model);
+    assert!(lopdf::Document::load_mem(&bytes).is_ok());
+}

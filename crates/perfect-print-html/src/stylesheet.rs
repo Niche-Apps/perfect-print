@@ -356,6 +356,21 @@ mod tests {
     }
 
     #[test]
+    fn at_page_rule_with_physical_units_resolves_to_points() {
+        let sheet = Stylesheet::parse("@page { size: 8.5in 11in }");
+        let size = sheet.page_rule.as_ref().unwrap().size.unwrap();
+        assert_eq!(size, PageSizeSpec::Custom { width: 612.0, height: 792.0 });
+        let page_size = size.to_page_size();
+        match page_size {
+            PageSize::Custom { width, height } => {
+                assert_eq!(width, 612.0);
+                assert_eq!(height, 792.0);
+            }
+            other => panic!("expected Custom page size, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn unknown_at_rule_produces_warning_not_error() {
         let sheet = Stylesheet::parse("@media print { p { color: red } }");
         assert!(sheet.warnings.iter().any(|w| w.contains("@media")));

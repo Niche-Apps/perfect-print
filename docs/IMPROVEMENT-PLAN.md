@@ -304,3 +304,46 @@ printing as blank pages on macOS. Fixed on `fix/print-blank-pages`.
   A4 paper translated content by `(-8.4, +24.9)`pt; after the fix the
   translate term is gone entirely and rasterized output shows no clipping
   at any edge across modes 0 (FitToPage), 2 (None), and 3 (Custom).
+
+## 2026-07-21: physical CSS units + `position: absolute` for template fidelity
+
+Root cause: PlainBooks generates absolutely positioned HTML
+(`<div style="position:absolute;left:0.5in;top:1.2in;...">`) with physical
+units, but `perfect-print-html` supported neither `position: absolute` nor
+`in`/`cm`/`mm` units — every template element collapsed into a top-down text
+flow, ignoring its authored coordinates. Fixed on
+`feature/absolute-positioning`.
+
+- **Physical length units.** `css::parse_length` gained `in` (×72), `cm`
+  (×72/2.54), `mm` (×72/25.4), and `pc` (×12), alongside the existing
+  `pt`/`px`/`em`/bare-number. Since `@page { size: ... }` and `left`/`top`/
+  `width` all route through this same function, `@page { size: 8.5in 11in }`
+  now resolves end-to-end to a 612×792pt page with no separate plumbing.
+- **`position: absolute`.** New `ContentBlock::Positioned { x, y, width,
+  blocks }` primitive in `perfect-print-layout/src/flow.rs`: laid out
+  outside the normal flow, on the current page, translated to `(x, y)`,
+  without moving the flow cursor. Content taller than the remaining page
+  overflows past the edge rather than paginating or clipping — matching
+  real CSS out-of-flow semantics. `FlowLayoutEngine::layout()` was
+  refactored to route through a new `layout_into_pages(blocks,
+  content_width, page_height)` helper so `Positioned` content can recurse
+  into it with `page_height = f64::INFINITY` (guaranteeing every block
+  takes the "fits on this page" branch) without touching
+  `paragraph.rs`/`text_shaper.rs` (off-limits — another session had them
+  checked out). In `perfect-print-html/src/convert.rs`, a `div` with
+  `position: absolute` now converts to a `Positioned` block (`left`/`top`
+  default to 0, `width` defaults to the remaining content width from `x`);
+  `position: relative` is accepted as a flow-preserving no-op.
+- **Verification:** rendered a representative PlainBooks invoice template
+  (`/tmp/pb-invoice.html` — 8.5×11in `@page`, absolutely positioned title,
+  address block, table, and right-aligned total) via `perfect-print-cli
+  render-html --dpi 100` and visually confirmed the output PNG matches the
+  authored layout: INVOICE title top-left at ~0.5in, address block below
+  it, items table spanning most of the width in the middle, and the total
+  right-aligned near the bottom-right (~7in down of an 11in page) — not a
+  stacked top-down flow.
+- Baseline `cargo test --workspace` (121 tests in the `perfect-print` crate
+  plus all other crates, one observed flake in
+  `adversarial_render_png_high_dpi` unrelated to this work) was recorded
+  before any change; the final `cargo test --workspace` run after both
+  features shows no new failures.

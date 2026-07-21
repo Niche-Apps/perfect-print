@@ -60,6 +60,8 @@ for warning in &result.warnings {
 - **Text shaping** — rustybuzz-powered shaping with bidi, ligatures, and kerning foundations
 - **Rich text** — mixed-style paragraphs (`RichParagraph`) and bulleted/numbered lists (`List`), inheriting document-level default styles
 - **HTML/CSS rendering** — pure-Rust HTML/CSS subset → `DocumentModel` → PDF/PNG/print, no browser or WebView (see `perfect-print-html`)
+- **Physical CSS length units** — `in`, `cm`, `mm`, `pc` (alongside `pt`/`px`/`em`) resolve to points anywhere a CSS length is accepted, including `@page { size: 8.5in 11in }`
+- **`position: absolute`** — absolutely positioned elements (`left`/`top`/`width` in any supported unit) render at their authored coordinates via `ContentBlock::Positioned`, out of the normal document flow; see [`docs/html-css-support.md`](docs/html-css-support.md#position-absolute) for the supported subset and limitations
 - **Image support** — PNG/JPEG loading, rendering in both raster and PDF backends
 - **PDF output** — with embedded images (FlateDecode XObjects), embedded fonts (including the correct bold/italic face, not a synthetic regular face), and text output
 - **Raster output** — via tiny-skia, any DPI

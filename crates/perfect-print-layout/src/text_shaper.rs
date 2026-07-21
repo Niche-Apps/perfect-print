@@ -152,6 +152,9 @@ impl TextShaper {
 
             let run_glyphs = self.shape_with_direction(run_text, font_size, loaded_font, direction);
 
+            // Clusters from shape_with_direction are byte offsets into
+            // `run_text`; rebase them so they index the full `text`.
+            let cluster_base = run_range.start as u32;
             if direction == Direction::RightToLeft {
                 let run_width: f64 = run_glyphs.iter().map(|g| g.x_advance).sum();
                 let mut pen_x = x_offset + run_width;
@@ -159,6 +162,7 @@ impl TextShaper {
                     pen_x -= glyph.x_advance;
                     all_glyphs.push(ShapedGlyph {
                         x_offset: pen_x - x_offset,
+                        cluster: glyph.cluster + cluster_base,
                         ..glyph
                     });
                 }
@@ -168,6 +172,7 @@ impl TextShaper {
                 for glyph in run_glyphs {
                     all_glyphs.push(ShapedGlyph {
                         x_offset: glyph.x_offset + x_offset,
+                        cluster: glyph.cluster + cluster_base,
                         ..glyph
                     });
                 }

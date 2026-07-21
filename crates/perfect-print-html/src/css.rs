@@ -43,6 +43,24 @@ pub fn parse_declarations(input: &str) -> Vec<Declaration> {
 /// - bare number → points.
 pub fn parse_length(value: &str, parent_size: f64) -> Option<f64> {
     let value = value.trim();
+    // Order matters: "pc" and "pt" share no suffix collisions, but check the
+    // two-letter physical units before the single-letter/percent cases.
+    if let Some(number) = value.strip_suffix("in") {
+        // 1in = 72pt (CSS reference pixel/point convention).
+        return number.trim().parse::<f64>().ok().map(|n| n * 72.0);
+    }
+    if let Some(number) = value.strip_suffix("cm") {
+        // 1cm = 72/2.54 pt.
+        return number.trim().parse::<f64>().ok().map(|n| n * 72.0 / 2.54);
+    }
+    if let Some(number) = value.strip_suffix("mm") {
+        // 1mm = 72/25.4 pt.
+        return number.trim().parse::<f64>().ok().map(|n| n * 72.0 / 25.4);
+    }
+    if let Some(number) = value.strip_suffix("pc") {
+        // 1pc = 12pt.
+        return number.trim().parse::<f64>().ok().map(|n| n * 12.0);
+    }
     if let Some(number) = value.strip_suffix("pt") {
         return number.trim().parse::<f64>().ok();
     }
@@ -51,6 +69,10 @@ pub fn parse_length(value: &str, parent_size: f64) -> Option<f64> {
     }
     if let Some(number) = value.strip_suffix("em") {
         return number.trim().parse::<f64>().ok().map(|n| n * parent_size);
+    }
+    if value.ends_with('%') {
+        // Percentage lengths are not resolved by this function today.
+        return None;
     }
     value.parse::<f64>().ok()
 }
@@ -147,6 +169,17 @@ mod tests {
         assert_eq!(parse_length("1.5em", 12.0), Some(18.0)); // em × parent size
         assert_eq!(parse_length("12", 12.0), Some(12.0)); // bare number = pt
         assert_eq!(parse_length("banana", 12.0), None);
+    }
+
+    #[test]
+    fn parses_physical_units() {
+        assert_eq!(parse_length("1in", 12.0), Some(72.0));
+        let cm = parse_length("2.54cm", 12.0).unwrap();
+        assert!((cm - 72.0).abs() < 1e-9, "2.54cm should be ~72pt, got {cm}");
+        let mm = parse_length("25.4mm", 12.0).unwrap();
+        assert!((mm - 72.0).abs() < 1e-9, "25.4mm should be ~72pt, got {mm}");
+        assert_eq!(parse_length("6pc", 12.0), Some(72.0));
+        assert_eq!(parse_length("50%", 12.0), None);
     }
 
     #[test]
