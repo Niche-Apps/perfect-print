@@ -21,6 +21,21 @@ pub struct StyledSpan {
     pub style: TextStyle,
 }
 
+/// The marker style for a `ContentBlock::List`.
+#[derive(Debug, Clone)]
+pub enum ListKind {
+    Bulleted,
+    Numbered,
+}
+
+/// One item within a `ContentBlock::List`.
+#[derive(Debug, Clone)]
+pub struct ListItem {
+    pub spans: Vec<StyledSpan>,
+    /// Nesting depth, 0-based. Each level indents 18pt further.
+    pub level: usize,
+}
+
 /// A block of content to be laid out in the flow.
 #[derive(Debug, Clone)]
 pub enum ContentBlock {
@@ -33,6 +48,12 @@ pub enum ContentBlock {
         base_style: TextStyle,
         /// Left indent in points (used by list items; 0 for plain rich paragraphs).
         indent_left: f64,
+    },
+    /// A bulleted or numbered list.
+    List {
+        items: Vec<ListItem>,
+        kind: ListKind,
+        style: TextStyle,
     },
     /// A table.
     Table {
@@ -125,11 +146,16 @@ impl FlowLayoutEngine {
         let page_height = content_rect.height;
         let content_width = content_rect.width;
 
+        // Lists are lowered into RichParagraphs (with a marker span and left
+        // indent) before pagination, so the rest of the loop only has to
+        // handle one "rich text" shape.
+        let expanded = expand_lists(blocks);
+
         let mut all_pages: Vec<Vec<PositionedBlock>> = vec![vec![]];
         let mut current_y: f64 = 0.0;
         let mut page_idx: usize = 0;
 
-        for block in blocks {
+        for block in &expanded {
             match block {
                 ContentBlock::PageBreak => {
                     page_idx += 1;
@@ -494,6 +520,60 @@ impl FlowLayoutEngine {
     }
 }
 
+/// Expand `ContentBlock::List` blocks into a sequence of `RichParagraph`
+/// blocks (marker span + item spans, indented per nesting level), leaving
+/// every other block untouched. Numbered lists number level-0 items
+/// sequentially; descending into a deeper level restarts that level's count.
+fn expand_lists(blocks: &[ContentBlock]) -> Vec<ContentBlock> {
+    let mut out = Vec::with_capacity(blocks.len());
+    for block in blocks {
+        match block {
+            ContentBlock::List { items, kind, style } => {
+                out.extend(expand_list_items(items, kind, style));
+            }
+            other => out.push(other.clone()),
+        }
+    }
+    out
+}
+
+fn expand_list_items(items: &[ListItem], kind: &ListKind, style: &TextStyle) -> Vec<ContentBlock> {
+    let mut counters: Vec<usize> = Vec::new();
+    let mut out = Vec::with_capacity(items.len());
+
+    for item in items {
+        let level = item.level;
+        if counters.len() <= level {
+            counters.resize(level + 1, 0);
+        } else {
+            // Coming back up (or staying at) this level: drop deeper counters
+            // so a subsequent nested run starts numbering from 1 again.
+            counters.truncate(level + 1);
+        }
+        counters[level] += 1;
+
+        let marker = match kind {
+            ListKind::Bulleted => "\u{2022} ".to_string(),
+            ListKind::Numbered => format!("{}. ", counters[level]),
+        };
+
+        let mut spans = Vec::with_capacity(item.spans.len() + 1);
+        spans.push(StyledSpan {
+            text: marker,
+            style: style.clone(),
+        });
+        spans.extend(item.spans.iter().cloned());
+
+        out.push(ContentBlock::RichParagraph {
+            spans,
+            base_style: style.clone(),
+            indent_left: 18.0 * (level as f64 + 1.0),
+        });
+    }
+
+    out
+}
+
 /// Convert a single-style line fragment (part of a RichParagraph row) into a
 /// draw command. `baseline` overrides the fragment's own baseline so mixed
 /// styles on one row share a baseline; `extra_x` (indent + alignment offset)
@@ -829,6 +909,87 @@ mod tests {
             bold.unwrap().1 > plain.unwrap().1,
             "bold run should start to the right of the plain run"
         );
+    }
+
+    #[test]
+    fn test_bulleted_list_indents_and_prefixes() {
+        let style = TextStyle::new(FontRef::new("Helvetica"), 12.0);
+        let block = ContentBlock::List {
+            items: vec![
+                ListItem {
+                    spans: vec![StyledSpan {
+                        text: "First".into(),
+                        style: style.clone(),
+                    }],
+                    level: 0,
+                },
+                ListItem {
+                    spans: vec![StyledSpan {
+                        text: "Second".into(),
+                        style: style.clone(),
+                    }],
+                    level: 0,
+                },
+            ],
+            kind: ListKind::Bulleted,
+            style: style.clone(),
+        };
+        let mut engine = FlowLayoutEngine::new(FlowConfig::default());
+        let model = engine.layout(&[block]);
+        let text: String = model
+            .pages
+            .iter()
+            .flat_map(|p| p.layers.iter())
+            .flat_map(|l| l.commands.iter())
+            .filter_map(|c| match c {
+                DrawCommand::Text { run, .. } => Some(run.text.clone()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join(" ");
+        assert!(text.contains("First") && text.contains("Second"));
+        // Bullet markers present:
+        assert!(text.contains('\u{2022}'));
+    }
+
+    #[test]
+    fn test_numbered_list_prefixes_sequentially() {
+        let style = TextStyle::new(FontRef::new("Helvetica"), 12.0);
+        let block = ContentBlock::List {
+            items: vec![
+                ListItem {
+                    spans: vec![StyledSpan {
+                        text: "Alpha".into(),
+                        style: style.clone(),
+                    }],
+                    level: 0,
+                },
+                ListItem {
+                    spans: vec![StyledSpan {
+                        text: "Beta".into(),
+                        style: style.clone(),
+                    }],
+                    level: 0,
+                },
+            ],
+            kind: ListKind::Numbered,
+            style: style.clone(),
+        };
+        let mut engine = FlowLayoutEngine::new(FlowConfig::default());
+        let model = engine.layout(&[block]);
+        let text: String = model
+            .pages
+            .iter()
+            .flat_map(|p| p.layers.iter())
+            .flat_map(|l| l.commands.iter())
+            .filter_map(|c| match c {
+                DrawCommand::Text { run, .. } => Some(run.text.clone()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join(" ");
+        assert!(text.contains("1."));
+        assert!(text.contains("2."));
     }
 
     #[test]

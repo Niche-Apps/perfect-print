@@ -21,7 +21,7 @@ pub use perfect_print_dialog::{
     PrinterState,
 };
 pub use perfect_print_layout::flow::{
-    ContentBlock, FlowConfig, FlowLayoutEngine, PositionedBlock, StyledSpan,
+    ContentBlock, FlowConfig, FlowLayoutEngine, ListKind, PositionedBlock, StyledSpan,
 };
 pub use perfect_print_layout::font_loader::{
     default_fallbacks, FallbackFont, FontCache, FontLoader, FontProperties, LoadedFont,
@@ -1004,6 +1004,81 @@ impl From<RichParagraph> for ContentBlock {
     }
 }
 
+// ─── List ──────────────────────────────────────────────────────────────
+
+/// A bulleted or numbered list, built up from plain-text or rich items.
+#[derive(Debug, Clone)]
+pub struct List {
+    items: Vec<perfect_print_layout::flow::ListItem>,
+    kind: ListKind,
+    style: TextStyle,
+}
+
+impl List {
+    pub fn bulleted() -> Self {
+        Self {
+            items: Vec::new(),
+            kind: ListKind::Bulleted,
+            style: TextStyle::new(FontRef::new("Helvetica"), 12.0),
+        }
+    }
+
+    pub fn numbered() -> Self {
+        Self {
+            items: Vec::new(),
+            kind: ListKind::Numbered,
+            style: TextStyle::new(FontRef::new("Helvetica"), 12.0),
+        }
+    }
+
+    /// Add a plain-text item at level 0.
+    pub fn item(mut self, text: impl Into<String>) -> Self {
+        self.items.push(perfect_print_layout::flow::ListItem {
+            spans: vec![StyledSpan {
+                text: text.into(),
+                style: self.style.clone(),
+            }],
+            level: 0,
+        });
+        self
+    }
+
+    /// Add a rich (mixed-style) item at level 0.
+    pub fn rich_item(mut self, paragraph: RichParagraph) -> Self {
+        self.items.push(perfect_print_layout::flow::ListItem {
+            spans: paragraph
+                .spans
+                .into_iter()
+                .map(|s| StyledSpan {
+                    text: s.text,
+                    style: s.style,
+                })
+                .collect(),
+            level: 0,
+        });
+        self
+    }
+
+    /// Flatten a nested list's items into this one, each one level deeper.
+    pub fn nested(mut self, inner: List) -> Self {
+        for mut item in inner.items {
+            item.level += 1;
+            self.items.push(item);
+        }
+        self
+    }
+}
+
+impl From<List> for ContentBlock {
+    fn from(list: List) -> Self {
+        ContentBlock::List {
+            items: list.items,
+            kind: list.kind,
+            style: list.style,
+        }
+    }
+}
+
 // ─── PageNumber ────────────────────────────────────────────────────────
 
 /// A page number variable for use in headers and footers.
@@ -1144,6 +1219,16 @@ fn extract_text_from_blocks(blocks: &[ContentBlock]) -> String {
                     result.push_str(&span.text);
                 }
             }
+            ContentBlock::List { items, .. } => {
+                for item in items {
+                    for span in &item.spans {
+                        if !result.is_empty() {
+                            result.push(' ');
+                        }
+                        result.push_str(&span.text);
+                    }
+                }
+            }
             ContentBlock::Table { rows, .. } => {
                 for row in rows {
                     for cell in &row.cells {
@@ -1278,6 +1363,47 @@ mod tests {
         }
     }
 
+    #[test]
+    fn test_list_builds_document_with_all_items() {
+        let doc = Document::new().add(
+            List::bulleted()
+                .item("First")
+                .item("Second")
+                .item("Third"),
+        );
+        let content = doc.text_content();
+        assert!(content.contains("First"));
+        assert!(content.contains("Second"));
+        assert!(content.contains("Third"));
+        let model = doc.build();
+        assert_eq!(model.page_count(), 1);
+    }
+
+    #[test]
+    fn test_list_into_content_block() {
+        let block: ContentBlock = List::numbered().item("a").item("b").into();
+        match block {
+            ContentBlock::List { items, kind, .. } => {
+                assert_eq!(items.len(), 2);
+                assert!(matches!(kind, ListKind::Numbered));
+            }
+            _ => panic!("Expected List"),
+        }
+    }
+
+    #[test]
+    fn test_list_nested_increments_level() {
+        let inner = List::bulleted().item("nested-a");
+        let outer = List::bulleted().item("top").nested(inner);
+        let block: ContentBlock = outer.into();
+        match block {
+            ContentBlock::List { items, .. } => {
+                assert_eq!(items[0].level, 0);
+                assert_eq!(items[1].level, 1);
+            }
+            _ => panic!("Expected List"),
+        }
+    }
 
     #[test]
     fn test_gap_into_content_block() {
