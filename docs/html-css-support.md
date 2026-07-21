@@ -48,7 +48,16 @@ positioned elements — so a template authored entirely in inches (e.g.
   between adjacent blocks — the larger of the previous block's
   `margin-bottom` and the next block's `margin-top` wins)
 - `letter-spacing`
-- `background-color` (table cells only)
+- `background-color`/`background` (table cells always; on `position: absolute`
+  elements when an explicit `height` is set — see [background/border-top on
+  positioned boxes](#backgroundborder-top-on-positioned-boxes) below. On any
+  other element it's parsed but not painted, and a warning is recorded
+  explaining why. `background` accepts a flat color only — gradients/images
+  warn; `transparent`/`none` clear it silently.)
+- `border-top` (`<width> solid <color>`, any order, on `position: absolute`
+  elements with an explicit `height`; see below. Only the `solid` style is
+  supported — other style keywords, e.g. `dashed`/`dotted`, warn and the
+  border is skipped. `none` clears it silently.)
 - `padding` (table cells only)
 - `page-break-before: always` / `page-break-after: always`
 - `break-before: page` / `break-after: page`
@@ -152,6 +161,48 @@ Font family defaults to Helvetica, color to black. `blockquote` gets a 36pt
 left indent. `code` defaults to Courier. Margins between blocks default to
 0.5× the element's font-size (top and bottom); heading margins default to
 0.75×.
+
+## `background`/`border-top` on positioned boxes
+
+A `position: absolute` element with an explicit `height` and a
+`background-color`/`background` and/or `border-top` paints a `FillRect`
+covering the box (background) and/or a thin `FillRect` along the box's top
+edge (border-top), drawn *before* the element's own content — matching CSS
+paint order (background, then borders, then content). This is what makes a
+PlainBooks "Total" highlight box (`<div style="position:absolute;...;
+width:2.2in;height:0.35in;background:#fff995;border-top:2px solid
+#333">Total: $438.40</div>`) render with its yellow fill and dark top rule
+behind the text, instead of a bare, unstyled number.
+
+- `background`/`background-color` accepts a flat color value only —
+  `linear-gradient(...)`/`url(...)` aren't representable as a solid fill and
+  produce a warning instead of being silently dropped or misrendered.
+  `transparent`/`none` mean "no fill" and are not warned about.
+- `border-top` accepts the standard `<width> <style> <color>` shorthand (any
+  order). Only `solid` is supported; any other recognized style keyword
+  (`dashed`, `dotted`, `double`, ...) causes the whole declaration to be
+  rejected with a warning rather than silently drawing a solid line the CSS
+  didn't ask for. `none` clears it silently.
+- **Requires an explicit `height`.** Without one there's no box to fill —
+  the declaration is parsed but the paint is skipped, with a warning
+  (`"...requires an explicit height to render and was skipped"`).
+- **Not supported outside `position: absolute` boxes.** A plain flow
+  `<div>`/`<p>`/etc. with `background-color`/`border-top` set also parses
+  the property but skips the paint, with a warning. This isn't a missing
+  feature so much as a real constraint of the flow layout engine today:
+  `ContentBlock::Commands` (the primitive used to paint these rects) is
+  drawn at a *fixed* content-relative coordinate — it isn't translated by
+  the block's position in the surrounding flow (see
+  `perfect_print_layout::flow`'s `test_commands_block_is_offset_by_margins`,
+  and the pre-existing `<hr>` rule, which has the same constraint). Painting
+  one mid-flow would land it in the wrong place on the page rather than
+  behind the block that requested it, so the converter warns and skips
+  instead of drawing something incorrect. Every PlainBooks invoice/template
+  element is emitted as `position: absolute` with an explicit height (see
+  `template_renderer.rs::render_element`'s `base_style`), so this covers the
+  real-world case; lifting the flow-relative restriction would need the
+  layout engine to translate `Commands` blocks by their resolved flow `y`,
+  which is out of scope here.
 
 ## Image sizing
 

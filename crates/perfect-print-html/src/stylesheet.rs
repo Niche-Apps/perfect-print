@@ -243,8 +243,9 @@ impl Stylesheet {
                             "size" => rule.size = PageSizeSpec::parse(&d.value),
                             "margin" => match parse_margin_shorthand(&d.value) {
                                 Some(m) => rule.margin = Some(m),
-                                None => warnings
-                                    .push(format!("unsupported @page margin: {}", d.value)),
+                                None => {
+                                    warnings.push(format!("unsupported @page margin: {}", d.value))
+                                }
                             },
                             "margin-top" | "margin-right" | "margin-bottom" | "margin-left" => {
                                 match parse_length(&d.value, 12.0) {

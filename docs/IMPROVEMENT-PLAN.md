@@ -498,3 +498,86 @@ Fixed:
   `cargo test --workspace` both green.
 - `docs/html-css-support.md`'s `@page` entry rewritten to document the
   shorthand forms and longhand cascade.
+
+## 2026-07-21: `background`/`border-top` on positioned boxes (Total highlight box)
+
+Root cause: a PlainBooks invoice template's "Total" element is a
+`position:absolute` `<div>` styled with a highlight fill and a top rule —
+e.g. `<div style="position:absolute;...;width:2.2in;height:0.35in;
+background:#fff995;border-top:2px solid #333">Total: $438.40</div>`.
+`template_renderer.rs::css_color_declaration` emits the *shorthand*
+`background:VALUE` (not `background-color:VALUE`) for
+`backgroundColor`/`background_color` style fields. `convert.rs` only
+recognized the `background-color` property name (and even then, only
+`emit_table`'s cell path ever read `ElementProps::background_color` — every
+other element type silently dropped it), so `background:#fff995` fell into
+the catch-all `other => warnings.push("unsupported CSS property: {other}")`
+arm and was never painted at all: the highlight box printed as a bare number
+with no fill and no rule.
+
+Fixed, TDD (`crates/perfect-print-html/src/convert.rs`):
+
+- **`apply_declarations`**: `"background-color"` arm now also matches
+  `"background"` (both map onto `ElementProps::background_color`).
+  `transparent`/`none` clear it with no warning; anything else that isn't a
+  parseable flat color (gradients, `url(...)`) warns rather than being
+  silently dropped or misrendered.
+- **New `border-top` property**: parsed by `parse_border_top` (standard
+  `<width> <style> <color>` shorthand, order-independent, mirroring the CSS
+  grammar) into a new `ElementProps::border_top: Option<BorderSpec>`. Only
+  `solid` is accepted as a style; any other recognized style keyword
+  (`dashed`, `dotted`, `double`, `groove`, `ridge`, `inset`, `outset`,
+  `hidden`) rejects the whole declaration with a warning. `none` clears it
+  silently.
+- **`emit_positioned`** now calls a new `box_paint_commands(props, width,
+  height)` — when the box has a resolvable `height` (the CSS `height`
+  declaration; PlainBooks always sets one, see
+  `template_renderer.rs::render_element`'s `base_style`), it pushes a
+  `ContentBlock::Commands` containing a background `FillRect` covering
+  `(0,0,width,height)` and/or a border-top `FillRect` covering
+  `(0,0,width,border_width)`, as the *first* block inside the positioned
+  box — before the recursive `walk_container` call that emits the text
+  content — so paint order is background, then border, then content
+  (matches CSS). Without a resolvable `height`, the paint is skipped with a
+  warning (there's no box to fill).
+- **Deliberately scoped to `position: absolute` boxes only.** Investigated
+  extending this to plain flow blocks (`<div>`/`<p>` without
+  `position:absolute`) per the original ask, but `ContentBlock::Commands` is
+  drawn at a *fixed* content-relative coordinate in the flow layout
+  engine — it is not translated by the block's position in the surrounding
+  flow (see `perfect_print_layout::flow::test_commands_block_is_offset_by_margins`;
+  the pre-existing `<hr>` rule has the identical constraint and the same
+  latent issue). Painting a background/border on a flow block would
+  therefore land the rect in the wrong place on the page (always near the
+  page's content-origin) rather than behind the block that requested it —
+  worse than not drawing it. `apply_declarations` still parses
+  `background-color`/`background`/`border-top` on any element (so it never
+  warns "unsupported CSS property" for them), but `walk_container`'s
+  non-positioned `div`/`body`/`html` branch and `emit_paragraph` now call a
+  shared `warn_unsupported_box_paint` that records a specific warning
+  ("...only supported on position:absolute elements with an explicit
+  height; skipped...") instead of drawing nothing silently. This matches
+  every real PlainBooks template element (all emitted as `position:absolute`
+  with an explicit height), so the real-world bug is fully fixed; lifting
+  the flow-relative restriction for the general case would require the
+  layout engine to translate `Commands` blocks by their resolved flow `y`,
+  out of scope here.
+- **Tests** (`crates/perfect-print-html/src/convert.rs`, written
+  failing-first): the `background:#fff995` shorthand on a positioned box
+  produces a `FillRect` at the box's `(0,0,width,height)` before the
+  `RichParagraph` text; the `background-color` longhand does the same;
+  `border-top:2px solid #333` produces a thin top-edge `FillRect`
+  (1.5pt = 2px); both together draw background, then border, then text, in
+  that order; `background-color:transparent`/`background:none` produce
+  neither a `Commands` block nor a warning; a gradient background warns
+  instead of being dropped or misrendered; a `dashed` `border-top` warns;
+  background/border-top on a non-positioned block warns and skips instead
+  of drawing nothing silently; background with no resolvable `height` warns
+  and skips. `cargo test -p perfect-print-html` (55 tests) and `cargo test
+  --workspace` (121+ tests across the workspace) both green, no
+  regressions.
+- `docs/html-css-support.md`: `background`/`background-color` entry
+  rewritten to cover the shorthand and the positioned-box requirement;
+  `border-top` added to the supported CSS properties list; new
+  `## background/border-top on positioned boxes` section documents the
+  paint-order guarantee and the flow-block limitation (with rationale).

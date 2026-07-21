@@ -173,6 +173,14 @@ enum ObjectFit {
     Contain,
 }
 
+/// A parsed `border-top` shorthand (`<width> solid <color>`). Only the
+/// `solid` style is supported today — see `parse_border_top`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct BorderSpec {
+    width: f64,
+    color: Color,
+}
+
 /// Non-inherited per-element CSS effects (margins, breaks, table styling).
 #[derive(Debug, Clone, Default)]
 struct ElementProps {
@@ -181,6 +189,7 @@ struct ElementProps {
     page_break_before: bool,
     page_break_after: bool,
     background_color: Option<Color>,
+    border_top: Option<BorderSpec>,
     padding: Option<f64>,
     position: Option<PositionMode>,
     left: Option<f64>,
@@ -213,6 +222,87 @@ fn parse_percentage(value: &str) -> Option<f64> {
 struct BoxContext {
     width: f64,
     height: Option<f64>,
+}
+
+/// `background-color: transparent` / `background-color: none` / the
+/// `border-top: none` shorthand — CSS's "explicitly nothing" values. Not an
+/// error (unlike an unparseable color), so callers skip the warning path.
+fn is_transparent_or_none(value: &str) -> bool {
+    let v = value.trim().to_ascii_lowercase();
+    v == "transparent" || v == "none"
+}
+
+/// Border style keywords recognized well enough to know they're *not*
+/// `solid` (so a mis-set style produces a warning instead of silently
+/// drawing a solid line the CSS didn't ask for).
+const BORDER_STYLE_KEYWORDS: &[&str] = &[
+    "solid", "dashed", "dotted", "double", "groove", "ridge", "inset", "outset", "hidden",
+];
+
+/// Parse a `border-top` shorthand (`<line-width> <line-style> <color>`, any
+/// order — matches the CSS grammar). Only `solid` is supported as a style;
+/// any other recognized style keyword (`dashed`, `dotted`, ...) rejects the
+/// whole declaration (the caller warns). A missing width defaults to `1.0`pt
+/// and a missing color defaults to black, but every real emitter (including
+/// PlainBooks' template renderer) supplies both explicitly.
+fn parse_border_top(value: &str, font_size: f64) -> Option<BorderSpec> {
+    let mut width: Option<f64> = None;
+    let mut color: Option<Color> = None;
+    let mut saw_unsupported_style = false;
+
+    for tok in value.split_whitespace() {
+        let lower = tok.to_ascii_lowercase();
+        if BORDER_STYLE_KEYWORDS.contains(&lower.as_str()) {
+            if lower != "solid" {
+                saw_unsupported_style = true;
+            }
+            continue;
+        }
+        if width.is_none() {
+            if let Some(w) = parse_length(tok, font_size) {
+                width = Some(w);
+                continue;
+            }
+        }
+        if let Some(c) = parse_color(tok) {
+            color = Some(c);
+            continue;
+        }
+        // Unrecognized token (bad width/color) — reject the whole
+        // declaration rather than guessing.
+        return None;
+    }
+
+    if saw_unsupported_style {
+        return None;
+    }
+
+    Some(BorderSpec {
+        width: width.unwrap_or(1.0),
+        color: color.unwrap_or_else(Color::black),
+    })
+}
+
+/// Background/border-top `FillRect` commands for a `width`×`height` box, in
+/// the box's own local (0,0)-origin coordinate space (the caller translates
+/// into place — see `emit_positioned`). Draw order is background first,
+/// then the border-top rule, then whatever text/content the caller appends
+/// after — matching CSS paint order (background, borders, then content).
+fn box_paint_commands(props: &ElementProps, width: f64, height: f64) -> Vec<DrawCommand> {
+    let mut cmds = Vec::new();
+    if let Some(bg) = props.background_color {
+        cmds.push(DrawCommand::FillRect {
+            rect: Rect::new(0.0, 0.0, width, height),
+            color: bg,
+        });
+    }
+    if let Some(border) = props.border_top {
+        cmds.push(DrawCommand::FillRect {
+            rect: Rect::new(0.0, 0.0, width, border.width),
+            color: border.color,
+        });
+    }
+    cmds
 }
 
 fn parse_font_weight(value: &str) -> Option<bool> {
@@ -317,10 +407,33 @@ fn apply_declarations(
                 Some(m) => props.margin_bottom = Some(m),
                 None => warnings.push(format!("unsupported margin-bottom: {}", d.value)),
             },
-            "background-color" => match parse_color(&d.value) {
-                Some(c) => props.background_color = Some(c),
-                None => warnings.push(format!("unsupported background-color: {}", d.value)),
-            },
+            "background-color" | "background" => {
+                let v = d.value.trim();
+                if is_transparent_or_none(v) {
+                    // `transparent`/`none` mean "no fill" — not an error,
+                    // and not a color to warn about either.
+                    props.background_color = None;
+                } else {
+                    match parse_color(v) {
+                        Some(c) => props.background_color = Some(c),
+                        // Gradients/images (`linear-gradient(...)`,
+                        // `url(...)`) aren't representable as a flat fill —
+                        // warn rather than silently drop or misrender.
+                        None => warnings.push(format!("unsupported {}: {}", d.property, d.value)),
+                    }
+                }
+            }
+            "border-top" => {
+                let v = d.value.trim();
+                if is_transparent_or_none(v) {
+                    props.border_top = None;
+                } else {
+                    match parse_border_top(v, style.size) {
+                        Some(spec) => props.border_top = Some(spec),
+                        None => warnings.push(format!("unsupported border-top: {}", d.value)),
+                    }
+                }
+            }
             "padding" => match parse_length(&d.value, style.size) {
                 Some(p) => props.padding = Some(p),
                 None => warnings.push(format!("unsupported padding: {}", d.value)),
@@ -643,6 +756,7 @@ impl Converter {
                     if props.position == Some(PositionMode::Absolute) {
                         self.emit_positioned(el, &el_style, &props);
                     } else {
+                        self.warn_unsupported_box_paint(&props);
                         self.open_block(&props);
                         self.walk_container(el, &el_style, indent);
                         self.close_block(&props, el_style.size * 0.5);
@@ -660,6 +774,25 @@ impl Converter {
         }
 
         self.flush_inline_run(&mut pending_inline, style, indent);
+    }
+
+    /// `background-color`/`border-top` are only actually painted on
+    /// `position: absolute` boxes with a resolvable height (see
+    /// `emit_positioned`/`box_paint_commands`) — the flow layout engine's
+    /// `ContentBlock::Commands` are painted at a fixed content-relative
+    /// coordinate, not translated by the block's flow position (see
+    /// `perfect_print_layout::flow`'s `test_commands_block_is_offset_by_margins`),
+    /// so drawing one mid-flow (outside a positioned box) would land in the
+    /// wrong place on the page rather than behind the block's own content.
+    /// Rather than silently drop the paint or draw it somewhere wrong, warn.
+    fn warn_unsupported_box_paint(&mut self, props: &ElementProps) {
+        if props.background_color.is_some() || props.border_top.is_some() {
+            self.warnings.push(
+                "background-color/border-top is only supported on position:absolute \
+                 elements with an explicit height; skipped on this element"
+                    .to_string(),
+            );
+        }
     }
 
     fn open_block(&mut self, props: &ElementProps) {
@@ -704,6 +837,23 @@ impl Converter {
             width,
             height: props.explicit_height,
         });
+
+        match props.explicit_height {
+            Some(height) => {
+                let cmds = box_paint_commands(props, width, height);
+                if !cmds.is_empty() {
+                    self.blocks.push(ContentBlock::Commands(cmds));
+                }
+            }
+            None if props.background_color.is_some() || props.border_top.is_some() => {
+                self.warnings.push(
+                    "background-color/border-top on a position:absolute element requires \
+                     an explicit height to render and was skipped"
+                        .to_string(),
+                );
+            }
+            None => {}
+        }
 
         self.walk_container(el, style, 0.0);
 
@@ -817,6 +967,7 @@ impl Converter {
 
     fn emit_paragraph(&mut self, el: ElementRef, tag: &str, style: &TextStyle, indent: f64) {
         let (el_style, props) = self.resolve(el, style);
+        self.warn_unsupported_box_paint(&props);
         let is_heading =
             tag.len() == 2 && tag.starts_with('h') && tag.as_bytes()[1].is_ascii_digit();
         let default_margin = if is_heading {
@@ -1361,7 +1512,10 @@ C</div>"#,
             panic!("expected RichParagraph, got {:?}", c.blocks[0]);
         };
         let text: String = spans.iter().map(|s| s.text.as_str()).collect();
-        assert_eq!(text, "A B", "default white-space should collapse \\n to a space");
+        assert_eq!(
+            text, "A B",
+            "default white-space should collapse \\n to a space"
+        );
     }
 
     #[test]
@@ -1669,6 +1823,230 @@ C</div>"#,
             .write_to(&mut Cursor::new(&mut buf), image::ImageFormat::Png)
             .expect("encode png");
         buf
+    }
+
+    // ─── background-color / border-top on positioned boxes ────────────
+
+    /// A `position:absolute` box with `background:#fff995` (the shorthand
+    /// PlainBooks' template renderer actually emits — see
+    /// `template_renderer.rs::css_color_declaration`, which writes
+    /// `background:VALUE`, not `background-color:VALUE`) must paint a
+    /// `FillRect` covering the whole box, before the text content.
+    #[test]
+    fn positioned_background_shorthand_fills_box_behind_text() {
+        let c = blocks_of(
+            r#"<div style="position:absolute;left:1in;top:1in;width:2in;height:0.5in;background:#fff995">Total: $438.40</div>"#,
+        );
+        let ContentBlock::Positioned { blocks, width, .. } = &c.blocks[0] else {
+            panic!("expected Positioned, got {:?}", c.blocks[0]);
+        };
+        let commands_idx = blocks
+            .iter()
+            .position(|b| matches!(b, ContentBlock::Commands(_)))
+            .expect("expected a Commands block for the background fill");
+        let text_idx = blocks
+            .iter()
+            .position(|b| matches!(b, ContentBlock::RichParagraph { .. }))
+            .expect("expected a RichParagraph for the text");
+        assert!(
+            commands_idx < text_idx,
+            "background must be drawn before text, got order {:?}",
+            blocks
+        );
+        let ContentBlock::Commands(cmds) = &blocks[commands_idx] else {
+            unreachable!()
+        };
+        let DrawCommand::FillRect { rect, color } = &cmds[0] else {
+            panic!("expected FillRect, got {:?}", cmds[0]);
+        };
+        assert_eq!(rect.x, 0.0);
+        assert_eq!(rect.y, 0.0);
+        assert_eq!(rect.width, *width);
+        assert!(
+            (rect.height - 36.0).abs() < 1e-6,
+            "0.5in = 36pt, got {}",
+            rect.height
+        );
+        assert_eq!(*color, Color::from_hex("#fff995").unwrap());
+        assert!(
+            c.warnings.iter().all(|w| !w.contains("background")),
+            "supported background shorthand should not warn, got {:?}",
+            c.warnings
+        );
+    }
+
+    #[test]
+    fn positioned_background_color_longhand_also_fills_box() {
+        let c = blocks_of(
+            r#"<div style="position:absolute;left:0;top:0;width:1in;height:1in;background-color:#ff0000">x</div>"#,
+        );
+        let ContentBlock::Positioned { blocks, .. } = &c.blocks[0] else {
+            panic!("expected Positioned");
+        };
+        let ContentBlock::Commands(cmds) = &blocks[0] else {
+            panic!("expected Commands block first, got {:?}", blocks[0]);
+        };
+        let DrawCommand::FillRect { color, .. } = &cmds[0] else {
+            panic!("expected FillRect");
+        };
+        assert_eq!(*color, Color::rgb(1.0, 0.0, 0.0));
+    }
+
+    #[test]
+    fn positioned_border_top_draws_thin_rect_at_box_top() {
+        let c = blocks_of(
+            r#"<div style="position:absolute;left:0;top:0;width:2in;height:0.5in;border-top:2px solid #333333">Total</div>"#,
+        );
+        let ContentBlock::Positioned { blocks, width, .. } = &c.blocks[0] else {
+            panic!("expected Positioned");
+        };
+        let ContentBlock::Commands(cmds) = &blocks[0] else {
+            panic!("expected Commands block first, got {:?}", blocks[0]);
+        };
+        assert_eq!(cmds.len(), 1, "no background set, only the border rect");
+        let DrawCommand::FillRect { rect, color } = &cmds[0] else {
+            panic!("expected FillRect");
+        };
+        assert_eq!(rect.x, 0.0);
+        assert_eq!(rect.y, 0.0);
+        assert_eq!(rect.width, *width);
+        assert!(
+            (rect.height - 1.5).abs() < 1e-6,
+            "2px = 1.5pt, got {}",
+            rect.height
+        );
+        assert_eq!(*color, Color::from_hex("#333333").unwrap());
+    }
+
+    #[test]
+    fn positioned_background_and_border_top_draw_background_then_border_then_text() {
+        let c = blocks_of(
+            r#"<div style="position:absolute;left:0;top:0;width:2in;height:0.5in;background:#fff995;border-top:2px solid #333333">Total: $438.40</div>"#,
+        );
+        let ContentBlock::Positioned { blocks, .. } = &c.blocks[0] else {
+            panic!("expected Positioned");
+        };
+        let ContentBlock::Commands(cmds) = &blocks[0] else {
+            panic!("expected Commands block first, got {:?}", blocks[0]);
+        };
+        assert_eq!(cmds.len(), 2, "background then border, got {:?}", cmds);
+        let DrawCommand::FillRect {
+            color: bg_color,
+            rect: bg_rect,
+            ..
+        } = &cmds[0]
+        else {
+            panic!("expected FillRect");
+        };
+        let DrawCommand::FillRect {
+            color: border_color,
+            rect: border_rect,
+            ..
+        } = &cmds[1]
+        else {
+            panic!("expected FillRect");
+        };
+        assert_eq!(*bg_color, Color::from_hex("#fff995").unwrap());
+        assert!((bg_rect.height - 36.0).abs() < 1e-6);
+        assert_eq!(*border_color, Color::from_hex("#333333").unwrap());
+        assert!((border_rect.height - 1.5).abs() < 1e-6);
+        assert!(matches!(blocks[1], ContentBlock::RichParagraph { .. }));
+    }
+
+    #[test]
+    fn background_transparent_produces_no_command_and_no_warning() {
+        let c = blocks_of(
+            r#"<div style="position:absolute;left:0;top:0;width:1in;height:1in;background-color:transparent">x</div>"#,
+        );
+        let ContentBlock::Positioned { blocks, .. } = &c.blocks[0] else {
+            panic!("expected Positioned");
+        };
+        assert!(
+            !blocks
+                .iter()
+                .any(|b| matches!(b, ContentBlock::Commands(_))),
+            "transparent background should not emit a Commands block, got {:?}",
+            blocks
+        );
+        assert!(
+            c.warnings.iter().all(|w| !w.contains("background")),
+            "transparent should not warn, got {:?}",
+            c.warnings
+        );
+    }
+
+    #[test]
+    fn background_none_produces_no_command_and_no_warning() {
+        let c = blocks_of(
+            r#"<div style="position:absolute;left:0;top:0;width:1in;height:1in;background:none">x</div>"#,
+        );
+        let ContentBlock::Positioned { blocks, .. } = &c.blocks[0] else {
+            panic!("expected Positioned");
+        };
+        assert!(!blocks
+            .iter()
+            .any(|b| matches!(b, ContentBlock::Commands(_))));
+        assert!(c.warnings.iter().all(|w| !w.contains("background")));
+    }
+
+    #[test]
+    fn background_gradient_warns_instead_of_misrendering() {
+        let c = blocks_of(
+            r#"<div style="position:absolute;left:0;top:0;width:1in;height:1in;background:linear-gradient(red, blue)">x</div>"#,
+        );
+        assert!(
+            c.warnings.iter().any(|w| w.contains("background")),
+            "gradient background should warn, got {:?}",
+            c.warnings
+        );
+        let ContentBlock::Positioned { blocks, .. } = &c.blocks[0] else {
+            panic!("expected Positioned");
+        };
+        assert!(!blocks
+            .iter()
+            .any(|b| matches!(b, ContentBlock::Commands(_))));
+    }
+
+    #[test]
+    fn border_top_dashed_style_warns_unsupported() {
+        let c = blocks_of(
+            r#"<div style="position:absolute;left:0;top:0;width:1in;height:1in;border-top:2px dashed #333">x</div>"#,
+        );
+        assert!(
+            c.warnings.iter().any(|w| w.contains("border-top")),
+            "dashed border-top should warn, got {:?}",
+            c.warnings
+        );
+    }
+
+    #[test]
+    fn background_on_non_positioned_block_warns_and_skips() {
+        let c = blocks_of(r#"<div style="background-color:#ff0000">x</div>"#);
+        assert!(
+            c.warnings
+                .iter()
+                .any(|w| w.contains("background-color") || w.contains("position:absolute")),
+            "background on a non-positioned block should warn about the limitation, got {:?}",
+            c.warnings
+        );
+        assert!(!c
+            .blocks
+            .iter()
+            .any(|b| matches!(b, ContentBlock::Commands(_))));
+    }
+
+    #[test]
+    fn positioned_background_without_height_warns_and_skips() {
+        let c = blocks_of(
+            r#"<div style="position:absolute;left:0;top:0;width:1in;background-color:#ff0000">x</div>"#,
+        );
+        let ContentBlock::Positioned { blocks, .. } = &c.blocks[0] else {
+            panic!("expected Positioned");
+        };
+        assert!(!blocks
+            .iter()
+            .any(|b| matches!(b, ContentBlock::Commands(_))));
+        assert!(c.warnings.iter().any(|w| w.contains("height")));
     }
 
     fn base64_encode(bytes: &[u8]) -> String {
