@@ -4873,7 +4873,7 @@ checksum = "9b4f627cb1b25917193a259e49bdad08f671f8d9708acfd5fe0a8c1455d87220"
 
 [[package]]
 name = "perfect-print"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "log",
  "perfect-print-backend-linux",
@@ -4890,7 +4890,7 @@ dependencies = [
 
 [[package]]
 name = "perfect-print-backend-linux"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "cups-sys",
  "log",
@@ -4901,7 +4901,7 @@ dependencies = [
 
 [[package]]
 name = "perfect-print-backend-macos"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "cc",
  "log",
@@ -4912,7 +4912,7 @@ dependencies = [
 
 [[package]]
 name = "perfect-print-backend-windows"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "log",
  "perfect-print-core",
@@ -4923,7 +4923,7 @@ dependencies = [
 
 [[package]]
 name = "perfect-print-barcode"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "barcoders",
  "perfect-print-core",
@@ -4933,7 +4933,7 @@ dependencies = [
 
 [[package]]
 name = "perfect-print-cli"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "chrono",
@@ -4955,7 +4955,7 @@ dependencies = [
 
 [[package]]
 name = "perfect-print-core"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "approx",
  "image 0.25.10",
@@ -4966,7 +4966,7 @@ dependencies = [
 
 [[package]]
 name = "perfect-print-dialog"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "log",
  "perfect-print-core",
@@ -4975,7 +4975,7 @@ dependencies = [
 
 [[package]]
 name = "perfect-print-egui"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "egui",
  "image 0.25.10",
@@ -4999,7 +4999,7 @@ dependencies = [
 
 [[package]]
 name = "perfect-print-html"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "ego-tree",
  "image 0.25.10",
@@ -5015,7 +5015,7 @@ dependencies = [
 
 [[package]]
 name = "perfect-print-iced"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "iced",
  "image 0.25.10",
@@ -5026,7 +5026,7 @@ dependencies = [
 
 [[package]]
 name = "perfect-print-integration"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "image 0.25.10",
  "insta",
@@ -5041,7 +5041,7 @@ dependencies = [
 
 [[package]]
 name = "perfect-print-layout"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "fontdb 0.21.0",
  "hyphenation",
@@ -5054,7 +5054,7 @@ dependencies = [
 
 [[package]]
 name = "perfect-print-pdf"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "flate2",
  "fontdb 0.21.0",
@@ -5070,7 +5070,7 @@ dependencies = [
 
 [[package]]
 name = "perfect-print-preview"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "log",
  "perfect-print-core",
@@ -5080,7 +5080,7 @@ dependencies = [
 
 [[package]]
 name = "perfect-print-render"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "fontdb 0.21.0",
  "log",
@@ -5092,7 +5092,7 @@ dependencies = [
 
 [[package]]
 name = "perfect-print-tauri"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "log",
  "perfect-print",
