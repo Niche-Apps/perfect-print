@@ -32,7 +32,11 @@ let paths = doc.render_png("output-pages", 300)?;
 
 `perfect-print-html` renders a supported HTML/CSS subset straight to the
 canonical document model — no browser or WebView involved, so output is
-deterministic and CI-testable. See
+deterministic and CI-testable. This covers absolutely positioned,
+pixel-designed templates (invoices, labels, receipts) authored in physical
+units just as well as ordinary flowed documents — `position: absolute`,
+`in`/`cm`/`mm`, and per-side `@page` margins all resolve to exact page
+coordinates, so a template renders where it was designed to. See
 [`docs/html-css-support.md`](docs/html-css-support.md) for the full supported
 tag/CSS-property list and the graceful-degradation policy.
 
@@ -55,17 +59,21 @@ for warning in &result.warnings {
 
 ## Features
 
-- **One canonical page model** — PDF, raster, preview, and print all consume the same model
+- **One canonical page model** — PDF, raster, preview, and print all consume the same model, in page-absolute coordinates (margins are applied once, centrally, so every backend agrees on where content sits)
 - **Exact units** — points, inches, mm, px-at-DPI
 - **Text shaping** — rustybuzz-powered shaping with bidi, ligatures, and kerning foundations
 - **Rich text** — mixed-style paragraphs (`RichParagraph`) and bulleted/numbered lists (`List`), inheriting document-level default styles
 - **HTML/CSS rendering** — pure-Rust HTML/CSS subset → `DocumentModel` → PDF/PNG/print, no browser or WebView (see `perfect-print-html`)
 - **Physical CSS length units** — `in`, `cm`, `mm`, `pc` (alongside `pt`/`px`/`em`) resolve to points anywhere a CSS length is accepted, including `@page { size: 8.5in 11in }`
-- **`position: absolute`** — absolutely positioned elements (`left`/`top`/`width` in any supported unit) render at their authored coordinates via `ContentBlock::Positioned`, out of the normal document flow; see [`docs/html-css-support.md`](docs/html-css-support.md#position-absolute) for the supported subset and limitations
+- **`position: absolute`** — absolutely positioned elements (`left`/`top`/`width`/`height` in any supported unit) render at their authored coordinates via `ContentBlock::Positioned`, out of the normal document flow — the basis for printing pixel-designed templates (invoices, labels, forms); see [`docs/html-css-support.md`](docs/html-css-support.md#position-absolute) for the supported subset and limitations
+- **`@page` margins** — shorthand (1–4 value) and longhand (`margin-top`/`-right`/`-bottom`/`-left`) forms both resolve to per-side page margins
+- **`white-space: pre-wrap` / `pre-line`** — literal `\n` in source HTML (common in server-rendered templates) renders as real line breaks instead of collapsing to one run-on line
+- **`background`/`border-top` on positioned boxes** — highlight/callout boxes (e.g. a shaded total line with a rule above it) paint correctly behind their text
+- **CSS-aware image sizing** — `<img>` respects CSS `width`/`height` (including `%` against its positioned container) and `object-fit: contain`/`fill`; an image never renders larger than its declared box or, absent one, the page — an oversized source logo can no longer cover the rest of a printed page
 - **Image support** — PNG/JPEG loading, rendering in both raster and PDF backends
-- **PDF output** — with embedded images (FlateDecode XObjects), embedded fonts (including the correct bold/italic face, not a synthetic regular face), and text output
+- **PDF output** — spec-valid font dictionaries (`/FirstChar`/`/LastChar`/`/Widths` per ISO 32000-1 §9.6.2, so strict print pipelines don't drop text), embedded images (FlateDecode XObjects), embedded fonts with the correct bold/italic face (not a synthetic regular face), and single-face extraction from TrueType Collections (smaller, portable PDFs instead of embedding a whole `.ttc`)
 - **Raster output** — via tiny-skia, any DPI
-- **Print backend** — macOS via CUPS (`lp`/`lpstat`); other backends are still maturing
+- **Print backend** — macOS via CUPS (`lp`/`lpstat`) and a native `NSPrintOperation` dialog with page-accurate placement (no double-applied offset/clipping); other backends are still maturing
 - **Visual diff CLI** — pixel-by-pixel PNG comparison with heatmaps
 - **Geometry assertions** — structured checks for page size, content bounds, text baselines
 - **Deterministic output** — identical documents produce byte-identical bytes
