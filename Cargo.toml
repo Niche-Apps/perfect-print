@@ -74,8 +74,5 @@ core-graphics = "0.24"
 core-text = "21"
 core-foundation = "0.10"
 
-# Linux (used by backend-linux)
-cups-sys = "0.1"
-
 # Windows (used by backend-windows)
-windows = { version = "0.58", features = ["Win32_Foundation", "Win32_Graphics_Gdi", "Win32_Graphics_Printing", "Win32_Security"] }
+windows = { version = "0.58", features = ["Win32_Foundation", "Win32_Graphics_Gdi", "Win32_Graphics_Printing", "Win32_Security", "Win32_Storage_Xps"] }

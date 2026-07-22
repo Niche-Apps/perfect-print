@@ -10,9 +10,5 @@ description = "Linux CUPS/IPP backend"
 
 [dependencies]
 perfect-print-core = { path = "../perfect-print-core" }
-perfect-print-pdf = { path = "../perfect-print-pdf" }
 perfect-print-dialog = { path = "../perfect-print-dialog" }
 log = { workspace = true }
-
-[target.'cfg(target_os = "linux")'.dependencies]
-cups-sys = { workspace = true }
