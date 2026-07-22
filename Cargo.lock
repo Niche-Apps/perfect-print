@@ -4709,6 +4709,7 @@ name = "perfect-print-backend-windows"
 version = "0.2.0"
 dependencies = [
  "log",
+ "perfect-print",
  "perfect-print-core",
  "perfect-print-dialog",
  "perfect-print-render",

@@ -7,13 +7,9 @@
 //! - `SetJob` for job cancellation
 
 use perfect_print_dialog::{PrintDialog, PrintDialogResult, PrintError, PrintSettings, Printer};
-use std::path::Path;
 
 #[cfg(target_os = "windows")]
-use perfect_print_dialog::{
-    ColorMode, DuplexMode, PageOrientation, PageRange, PrintScaling, PrinterCapabilities,
-    PrinterState,
-};
+use perfect_print_dialog::{PageRange, PrinterCapabilities, PrinterState};
 
 #[cfg(target_os = "windows")]
 use perfect_print_core::page::PageSize;
@@ -21,7 +17,17 @@ use perfect_print_core::page::PageSize;
 #[cfg(target_os = "windows")]
 use windows::{
     core::*, Win32::Foundation::*, Win32::Graphics::Gdi::*, Win32::Graphics::Printing::*,
+    Win32::Storage::Xps::*,
 };
+
+#[cfg(target_os = "windows")]
+use perfect_print_core::document::DocumentModel;
+#[cfg(target_os = "windows")]
+use perfect_print_core::units::Dpi;
+#[cfg(target_os = "windows")]
+use perfect_print_render::Render as _;
+#[cfg(target_os = "windows")]
+use perfect_print_render::TinySkiaRenderer;
 
 /// Windows native print backend.
 pub struct WindowsPrintDialog;
@@ -185,97 +191,22 @@ impl WindowsPrintDialog {
         }
     }
 
-    /// Submit a print job via the Win32 Printing API.
+    /// Submit a print job by rasterizing every page and blitting each page's
+    /// bitmap onto a GDI printer device context.
+    ///
+    /// This does not depend on the printer driver understanding PDF (most
+    /// don't, when fed raw bytes) — it produces a bitmap of exactly what
+    /// perfect-print's own raster/PNG output would show, at the printer's
+    /// own reported resolution, so output is WYSIWYG on any GDI-capable
+    /// Windows printer driver.
     #[cfg(target_os = "windows")]
     pub fn submit_print_job(
         &self,
-        pdf_path: &Path,
+        model: &DocumentModel,
         settings: &PrintSettings,
     ) -> PrintDialogResult<Option<String>> {
-        let pdf_data = std::fs::read(pdf_path).map_err(|e| {
-            PrintError::Io(std::io::Error::new(
-                std::io::ErrorKind::Other,
-                format!("Failed to read PDF: {}", e),
-            ))
-        })?;
-
         let printer_name = Self::get_default_printer_name().ok_or(PrintError::NoPrinters)?;
-
-        // Open the printer
-        let mut hprinter = HANDLE::default();
-        let printer_name_cstr = std::ffi::CString::new(printer_name.clone())
-            .map_err(|e| PrintError::Platform(format!("Invalid printer name: {}", e)))?;
-
-        unsafe {
-            OpenPrinterA(
-                PCSTR(printer_name_cstr.as_ptr() as *const u8),
-                &mut hprinter,
-                None,
-            )
-            .map_err(|e| PrintError::Platform(format!("OpenPrinter failed: {}", e)))?;
-        }
-
-        // Set up DOC_INFO_1
-        let doc_name = "perfect-print job";
-        let doc_name_cstr = std::ffi::CString::new(doc_name).unwrap();
-        let doc_info = DOC_INFO_1A {
-            pDocName: PSTR(doc_name_cstr.as_ptr() as *mut u8),
-            pOutputFile: PSTR::null(),
-            pDatatype: PSTR::null(),
-        };
-
-        // Start the document
-        let job_id = unsafe { StartDocPrinterA(hprinter, 1, &doc_info) };
-        if job_id == 0 {
-            unsafe { ClosePrinter(hprinter) };
-            return Err(PrintError::PrintFailed(
-                "StartDocPrinter failed".to_string(),
-            ));
-        }
-
-        // Start a page
-        unsafe {
-            if !StartPagePrinter(hprinter).as_bool() {
-                EndDocPrinter(hprinter);
-                ClosePrinter(hprinter);
-                return Err(PrintError::PrintFailed(
-                    "StartPagePrinter failed".to_string(),
-                ));
-            }
-        }
-
-        // Write the PDF data
-        let mut written: u32 = 0;
-        unsafe {
-            let result = WritePrinter(
-                hprinter,
-                pdf_data.as_ptr() as *const _,
-                pdf_data.len() as u32,
-                &mut written,
-            );
-            if !result.as_bool() {
-                EndPagePrinter(hprinter);
-                EndDocPrinter(hprinter);
-                ClosePrinter(hprinter);
-                return Err(PrintError::PrintFailed("WritePrinter failed".to_string()));
-            }
-        }
-
-        // End page and document
-        unsafe {
-            EndPagePrinter(hprinter);
-            EndDocPrinter(hprinter);
-            ClosePrinter(hprinter);
-        }
-
-        log::info!(
-            "Print job submitted: {} bytes to printer '{}' (job {})",
-            written,
-            printer_name,
-            job_id
-        );
-
-        Ok(Some(format!("{}-{}", printer_name, job_id)))
+        print_to_printer(&printer_name, None, model, settings)
     }
 
     /// Poll the status of a print job.
@@ -440,6 +371,248 @@ impl WindowsPrintDialog {
     }
 }
 
+/// Open a printer DC by name, run the full `StartDoc`/`StartPage`/blit/
+/// `EndPage`/`EndDoc` sequence for every requested page (and copy), and
+/// optionally direct output to a file (for the `Microsoft Print to PDF`
+/// virtual printer smoke test) instead of a real physical device.
+#[cfg(target_os = "windows")]
+fn print_to_printer(
+    printer_name: &str,
+    output_file: Option<&std::path::Path>,
+    model: &DocumentModel,
+    settings: &PrintSettings,
+) -> PrintDialogResult<Option<String>> {
+    let printer_name_cstr = std::ffi::CString::new(printer_name)
+        .map_err(|e| PrintError::Platform(format!("Invalid printer name: {}", e)))?;
+
+    let hdc = unsafe {
+        CreateDCA(
+            PCSTR::null(),
+            PCSTR(printer_name_cstr.as_ptr() as *const u8),
+            PCSTR::null(),
+            None,
+        )
+    };
+    if hdc.is_invalid() {
+        return Err(PrintError::Platform(format!(
+            "CreateDC failed for printer '{}'",
+            printer_name
+        )));
+    }
+
+    // Ensure the DC is always released, even on an early error return.
+    struct DcGuard(HDC);
+    impl Drop for DcGuard {
+        fn drop(&mut self) {
+            unsafe {
+                let _ = DeleteDC(self.0);
+            }
+        }
+    }
+    let _dc_guard = DcGuard(hdc);
+
+    let dpi_x = unsafe { GetDeviceCaps(hdc, LOGPIXELSX) };
+    let dpi_y = unsafe { GetDeviceCaps(hdc, LOGPIXELSY) };
+    let dpi = if dpi_x > 0 { dpi_x as f64 } else { 300.0 };
+    let _ = dpi_y; // assumed equal to dpi_x for print DCs; not used separately below
+
+    let phys_width = unsafe { GetDeviceCaps(hdc, PHYSICALWIDTH) };
+    let phys_height = unsafe { GetDeviceCaps(hdc, PHYSICALHEIGHT) };
+    let offset_x = unsafe { GetDeviceCaps(hdc, PHYSICALOFFSETX) };
+    let offset_y = unsafe { GetDeviceCaps(hdc, PHYSICALOFFSETY) };
+
+    let doc_name = "perfect-print job";
+    let doc_name_cstr = std::ffi::CString::new(doc_name).unwrap();
+    let output_cstr = output_file
+        .map(|p| {
+            std::ffi::CString::new(p.to_string_lossy().into_owned())
+                .map_err(|e| PrintError::Platform(format!("Invalid output path: {}", e)))
+        })
+        .transpose()?;
+    let lpsz_output = match &output_cstr {
+        Some(c) => PCSTR(c.as_ptr() as *const u8),
+        None => PCSTR::null(),
+    };
+    let doc_info = DOCINFOA {
+        cbSize: std::mem::size_of::<DOCINFOA>() as i32,
+        lpszDocName: PCSTR(doc_name_cstr.as_ptr() as *const u8),
+        lpszOutput: lpsz_output,
+        lpszDatatype: PCSTR::null(),
+        fwType: 0,
+    };
+
+    let job_id = unsafe { StartDocA(hdc, &doc_info) };
+    if job_id <= 0 {
+        return Err(PrintError::PrintFailed("StartDoc failed".to_string()));
+    }
+
+    let renderer = TinySkiaRenderer::new();
+    let page_indices = resolve_page_indices(&settings.page_range, model.page_count());
+
+    for _copy in 0..settings.copies.max(1) {
+        for &page_index in &page_indices {
+            if unsafe { StartPage(hdc) } <= 0 {
+                unsafe {
+                    let _ = AbortDoc(hdc);
+                };
+                return Err(PrintError::PrintFailed("StartPage failed".to_string()));
+            }
+
+            let pixmap = renderer
+                .render_page_to_pixmap(model, page_index, Dpi(dpi))
+                .map_err(|e| {
+                    PrintError::PrintFailed(format!(
+                        "Failed to rasterize page {}: {}",
+                        page_index + 1,
+                        e
+                    ))
+                })?;
+
+            blit_pixmap(hdc, &pixmap, phys_width, phys_height, offset_x, offset_y)?;
+
+            if unsafe { EndPage(hdc) } <= 0 {
+                unsafe {
+                    let _ = AbortDoc(hdc);
+                };
+                return Err(PrintError::PrintFailed("EndPage failed".to_string()));
+            }
+        }
+    }
+
+    if unsafe { EndDoc(hdc) } <= 0 {
+        return Err(PrintError::PrintFailed("EndDoc failed".to_string()));
+    }
+
+    log::info!(
+        "Print job submitted: {} page(s) to printer '{}' (job {})",
+        page_indices.len(),
+        printer_name,
+        job_id
+    );
+
+    Ok(Some(format!("{}-{}", printer_name, job_id)))
+}
+
+/// Print to an explicitly named printer, optionally redirecting output to a
+/// file (used by the `Microsoft Print to PDF` virtual printer). Public only
+/// so the Windows-only smoke-test example binary can call it directly; not
+/// part of the crate's intended public surface.
+#[doc(hidden)]
+#[cfg(target_os = "windows")]
+pub fn print_to_named_printer_for_test(
+    printer_name: &str,
+    model: &DocumentModel,
+    settings: &PrintSettings,
+    output_path: &str,
+) -> PrintDialogResult<Option<String>> {
+    print_to_printer(
+        printer_name,
+        Some(std::path::Path::new(output_path)),
+        model,
+        settings,
+    )
+}
+
+/// Resolve a `PageRange` against an actual page count into a concrete,
+/// 0-indexed, in-order list of page indices to print.
+#[cfg(target_os = "windows")]
+fn resolve_page_indices(range: &PageRange, page_count: usize) -> Vec<usize> {
+    match range {
+        PageRange::All => (0..page_count).collect(),
+        PageRange::Range(start, end) => {
+            let start = (*start).max(1) as usize;
+            let end = (*end as usize).min(page_count);
+            if start > end {
+                vec![]
+            } else {
+                (start - 1..end).collect()
+            }
+        }
+        PageRange::Pages(pages) => pages
+            .iter()
+            .filter(|&&p| p >= 1 && (p as usize) <= page_count)
+            .map(|&p| (p - 1) as usize)
+            .collect(),
+    }
+}
+
+/// Blit a rendered page bitmap onto the printer DC, filling the full
+/// physical page (offset by the driver-reported unprintable margin) —
+/// matching the page's own point-size 1:1 at the DC's reported DPI, the
+/// same "just draw the page, let the driver map it to paper" contract
+/// perfect-print-backend-macos relies on via PDFKit.
+#[cfg(target_os = "windows")]
+fn blit_pixmap(
+    hdc: HDC,
+    pixmap: &tiny_skia::Pixmap,
+    phys_width: i32,
+    phys_height: i32,
+    offset_x: i32,
+    offset_y: i32,
+) -> PrintDialogResult<()> {
+    let width = pixmap.width() as i32;
+    let height = pixmap.height() as i32;
+
+    // tiny-skia's Pixmap is premultiplied RGBA, top-to-bottom rows.
+    // GDI DIBs expect BGRA (or a negative height for top-down) with a
+    // positive-height bottom-up row order by convention; use a negative
+    // biHeight to keep the pixmap's natural top-down row order and swap
+    // R/B per pixel into a BGRA scratch buffer GDI expects.
+    let mut bgra = vec![0u8; pixmap.data().len()];
+    for (src, dst) in pixmap.data().chunks_exact(4).zip(bgra.chunks_exact_mut(4)) {
+        dst[0] = src[2]; // B
+        dst[1] = src[1]; // G
+        dst[2] = src[0]; // R
+        dst[3] = src[3]; // A
+    }
+
+    let bmi = BITMAPINFO {
+        bmiHeader: BITMAPINFOHEADER {
+            biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
+            biWidth: width,
+            biHeight: -height, // negative = top-down
+            biPlanes: 1,
+            biBitCount: 32,
+            biCompression: BI_RGB.0 as u32,
+            biSizeImage: 0,
+            biXPelsPerMeter: 0,
+            biYPelsPerMeter: 0,
+            biClrUsed: 0,
+            biClrImportant: 0,
+        },
+        bmiColors: [Default::default(); 1],
+    };
+
+    let dest_width = phys_width.max(1);
+    let dest_height = phys_height.max(1);
+
+    let result = unsafe {
+        StretchDIBits(
+            hdc,
+            -offset_x,
+            -offset_y,
+            dest_width,
+            dest_height,
+            0,
+            0,
+            width,
+            height,
+            Some(bgra.as_ptr() as *const std::ffi::c_void),
+            &bmi,
+            DIB_RGB_COLORS,
+            SRCCOPY,
+        )
+    };
+
+    if result == 0 || result == GDI_ERROR as i32 {
+        return Err(PrintError::PrintFailed(
+            "StretchDIBits failed while printing a page".to_string(),
+        ));
+    }
+
+    Ok(())
+}
+
 /// Map Win32 paper size constants to our PageSize enum.
 #[cfg(target_os = "windows")]
 fn paper_size_from_win32(dm_paper_size: u16) -> Option<PageSize> {
@@ -464,7 +637,7 @@ impl WindowsPrintDialog {
 
     pub fn submit_print_job(
         &self,
-        _pdf_path: &Path,
+        _model: &perfect_print_core::document::DocumentModel,
         _settings: &PrintSettings,
     ) -> PrintDialogResult<Option<String>> {
         Err(PrintError::Platform(
@@ -568,10 +741,16 @@ mod tests {
     }
 
     #[test]
-    fn test_submit_job_nonexistent_file() {
-        let dialog = WindowsPrintDialog::new();
-        let path = Path::new("/tmp/nonexistent_12345.pdf");
-        let result = dialog.submit_print_job(path, &PrintSettings::default());
-        assert!(result.is_err(), "Should fail for nonexistent file");
+    fn test_submit_job_stub_on_non_windows() {
+        #[cfg(not(target_os = "windows"))]
+        {
+            let dialog = WindowsPrintDialog::new();
+            let model = perfect_print_core::document::DocumentBuilder::new()
+                .page(perfect_print_core::page::PageSize::Letter)
+                .build()
+                .unwrap();
+            let result = dialog.submit_print_job(&model, &PrintSettings::default());
+            assert!(result.is_err(), "Should fail on non-Windows (stub backend)");
+        }
     }
 }

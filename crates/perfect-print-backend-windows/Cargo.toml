@@ -10,9 +10,13 @@ description = "Windows native print backend"
 
 [dependencies]
 perfect-print-core = { path = "../perfect-print-core" }
-perfect-print-pdf = { path = "../perfect-print-pdf" }
 perfect-print-dialog = { path = "../perfect-print-dialog" }
 log = { workspace = true }
 
 [target.'cfg(target_os = "windows")'.dependencies]
 windows = { workspace = true }
+perfect-print-render = { path = "../perfect-print-render" }
+tiny-skia = { workspace = true }
+
+[target.'cfg(target_os = "windows")'.dev-dependencies]
+perfect-print = { path = "../perfect-print" }

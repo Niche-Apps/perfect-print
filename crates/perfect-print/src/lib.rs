@@ -329,6 +329,7 @@ pub fn print_document_with(
         .render_to_bytes(model)
         .map_err(|e| PrintError::PrintFailed(format!("PDF render failed: {}", e)))?;
     platform_print_bytes(
+        model,
         &pdf_bytes,
         model.metadata.title.as_deref().unwrap_or("Perfect Print"),
         settings,
@@ -337,6 +338,7 @@ pub fn print_document_with(
 
 #[cfg(target_os = "macos")]
 fn platform_print_bytes(
+    _model: &DocumentModel,
     pdf_bytes: &[u8],
     title: &str,
     settings: &PrintSettings,
@@ -347,6 +349,7 @@ fn platform_print_bytes(
 
 #[cfg(any(target_os = "linux", target_os = "windows"))]
 fn platform_print_bytes(
+    model: &DocumentModel,
     pdf_bytes: &[u8],
     _title: &str,
     settings: &PrintSettings,
@@ -362,11 +365,12 @@ fn platform_print_bytes(
         .write_all(pdf_bytes)
         .and_then(|_| pdf_file.flush())
         .map_err(|e| PrintError::PrintFailed(format!("Temporary PDF write failed: {}", e)))?;
-    platform_print_file(pdf_file.path(), settings)
+    platform_print_file(model, pdf_file.path(), settings)
 }
 
 #[cfg(target_os = "linux")]
 fn platform_print_file(
+    _model: &DocumentModel,
     pdf_path: &std::path::Path,
     settings: &PrintSettings,
 ) -> Result<Option<String>, PrintError> {
@@ -376,11 +380,12 @@ fn platform_print_file(
 
 #[cfg(target_os = "windows")]
 fn platform_print_file(
-    pdf_path: &std::path::Path,
+    model: &DocumentModel,
+    _pdf_path: &std::path::Path,
     settings: &PrintSettings,
 ) -> Result<Option<String>, PrintError> {
     let dialog = perfect_print_backend_windows::WindowsPrintDialog::new();
-    dialog.submit_print_job(pdf_path, settings)
+    dialog.submit_print_job(model, settings)
 }
 
 // ─── Table ──────────────────────────────────────────────────────────────
