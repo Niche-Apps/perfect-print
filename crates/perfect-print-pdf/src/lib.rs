@@ -393,6 +393,14 @@ impl PdfRenderer {
                 let y = page_height - position.y;
                 content.push_str("BT\n");
 
+                // Text paints with the current nonstroking colour, which persists
+                // across commands. Without setting it here, a run inherits whatever
+                // the last FillRect/FillPath left behind - so text drawn over a
+                // filled background came out in the background's colour (invisible),
+                // and every later run on the page inherited it too. Always emit the
+                // run's own colour.
+                content.push_str(&format_fill_color(&run.style.color));
+
                 // Find the font reference for this run's font, matching
                 // family AND bold/italic so the glyph IDs (shaped against a
                 // specific face) line up with the embedded face.
@@ -1295,5 +1303,77 @@ mod tests {
         }
 
         assert!(found_font, "PDF should contain a TrueType font dictionary");
+    }
+}
+
+#[cfg(test)]
+mod text_color_tests {
+    use super::*;
+    use perfect_print_core::color::Color;
+    use perfect_print_core::draw::{DrawCommand, TextRun, TextStyle};
+    use perfect_print_core::font::FontRef;
+    use perfect_print_core::units::{Point, Rect};
+
+    fn text_cmd(color: Color) -> DrawCommand {
+        let mut style = TextStyle::new(FontRef::new("Helvetica"), 12.0);
+        style.color = color;
+        DrawCommand::Text {
+            run: TextRun { text: "Total".to_string(), glyphs: vec![], style },
+            position: Point::new(72.0, 72.0),
+            max_width: None,
+        }
+    }
+
+    /// A filled background must not bleed into the text drawn over it. PDF text
+    /// paints with the current nonstroking colour, so without the run emitting
+    /// its own colour it inherits the preceding FillRect - rendering the text
+    /// invisible against its own background and tinting every later run.
+    #[test]
+    fn text_sets_its_own_fill_colour_after_a_filled_rect() {
+        let renderer = PdfRenderer::new();
+        let mut content = String::new();
+
+        renderer
+            .render_command(
+                &mut content,
+                &DrawCommand::FillRect {
+                    rect: Rect::new(0.0, 0.0, 100.0, 20.0),
+                    color: Color::rgb(1.0, 1.0, 0.0), // yellow background
+                },
+                792.0,
+                &[],
+                &[],
+            )
+            .unwrap();
+
+        let after_rect = content.len();
+
+        renderer
+            .render_command(&mut content, &text_cmd(Color::black()), 792.0, &[], &[])
+            .unwrap();
+
+        let text_section = &content[after_rect..];
+        assert!(
+            text_section.contains("0 0 0 rg"),
+            "text run must emit its own fill colour; got: {text_section}"
+        );
+    }
+
+    #[test]
+    fn each_text_run_emits_its_own_colour() {
+        let renderer = PdfRenderer::new();
+        let mut content = String::new();
+        renderer
+            .render_command(&mut content, &text_cmd(Color::red()), 792.0, &[], &[])
+            .unwrap();
+        let after_first = content.len();
+        renderer
+            .render_command(&mut content, &text_cmd(Color::black()), 792.0, &[], &[])
+            .unwrap();
+
+        assert!(
+            content[after_first..].contains("0 0 0 rg"),
+            "a later run must not inherit the previous run's colour"
+        );
     }
 }
