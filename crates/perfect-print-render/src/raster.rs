@@ -58,7 +58,14 @@ impl FontCache {
         }
 
         let query = fontdb::Query {
-            families: &[fontdb::Family::Name(font_ref.as_ref())],
+            // `families` is a priority-ordered fallback list, not a single
+            // required name — appending the generic `SansSerif` family
+            // means a request for a family this system doesn't have
+            // installed (e.g. "Helvetica" on Windows) still resolves to the
+            // OS's actual default sans-serif font instead of failing
+            // outright and silently drawing nothing. See
+            // `load_font_falls_back_to_a_generic_family_when_the_exact_name_is_absent`.
+            families: &[fontdb::Family::Name(font_ref.as_ref()), fontdb::Family::SansSerif],
             weight: if bold {
                 fontdb::Weight::BOLD
             } else {
@@ -705,6 +712,28 @@ mod tests {
         let upem = font.unwrap().units_per_em;
         assert!(upem > 0, "units_per_em must be positive");
         assert!(upem <= 10000, "units_per_em should be reasonable (<=10000)");
+    }
+
+    #[test]
+    fn load_font_falls_back_to_a_generic_family_when_the_exact_name_is_absent() {
+        // Regression test for a real bug found via end-to-end Windows print
+        // verification: this FontCache queried fontdb with a single-entry
+        // family list (just the exact requested name). On a system that
+        // doesn't have a font literally named "Helvetica" installed (true on
+        // Windows), `load_font` returned `None`, and the caller at draw time
+        // simply skips drawing that run's glyphs — producing a correctly
+        // paginated but completely blank page, with no error anywhere. A
+        // request for an unresolvable family must still draw with *some*
+        // installed font.
+        let mut cache = FontCache::new();
+        let font_ref =
+            perfect_print_core::font::FontRef::new("Definitely Not A Real Font Family Name XYZ123");
+        let font = cache.load_font(&font_ref, false, false);
+        assert!(
+            font.is_some(),
+            "an unresolvable family name must still fall back to a generic \
+             system font instead of returning None"
+        );
     }
 
     #[test]
