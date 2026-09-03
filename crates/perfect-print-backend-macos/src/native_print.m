@@ -5,6 +5,7 @@
 #include <stdbool.h>
 #include <stdint.h>
 #include <string.h>
+#include <math.h>
 #include <dispatch/dispatch.h>
 #include "poster_tiles.h"
 
@@ -29,6 +30,9 @@ typedef struct {
 @property(nonatomic) double customScale;
 @property(nonatomic, strong) NSArray<NSNumber *> *pageNumbers;
 @property(nonatomic) NSSize fallbackPaperSize;
+@property(nonatomic, strong) NSMutableDictionary<NSNumber *, NSData *> *inkSampleBytes;
+@property(nonatomic, strong) NSMutableDictionary<NSNumber *, NSValue *> *inkSampleSize;
+@property(nonatomic) void *inkSampleDocKey;
 @end
 
 @implementation PerfectPrintPDFView
@@ -120,18 +124,138 @@ typedef struct {
     return [page boundsForBox:kPDFDisplayBoxMediaBox];
 }
 
+/// Low-res top-down occupancy bitmap for one source page (row 0 = media top).
+/// Cached per document page so Scale / paper changes only re-slice tiles.
+- (BOOL)inkSampleForDocumentPage:(NSUInteger)documentPage1
+                          pixels:(const uint8_t **)outPixels
+                           width:(uint32_t *)outWidth
+                          height:(uint32_t *)outHeight {
+    if (!self.document || documentPage1 < 1 || documentPage1 > self.document.pageCount) {
+        return NO;
+    }
+    if (self.inkSampleDocKey != (__bridge void *)self.document) {
+        [self.inkSampleBytes removeAllObjects];
+        [self.inkSampleSize removeAllObjects];
+        self.inkSampleDocKey = (__bridge void *)self.document;
+    }
+    if (!self.inkSampleBytes) {
+        self.inkSampleBytes = [NSMutableDictionary dictionary];
+        self.inkSampleSize = [NSMutableDictionary dictionary];
+    }
+
+    NSNumber *key = @(documentPage1);
+    NSData *cached = self.inkSampleBytes[key];
+    NSValue *sizeValue = self.inkSampleSize[key];
+    if (cached && sizeValue) {
+        NSSize size = sizeValue.sizeValue;
+        if (outPixels) *outPixels = cached.bytes;
+        if (outWidth) *outWidth = (uint32_t)size.width;
+        if (outHeight) *outHeight = (uint32_t)size.height;
+        return YES;
+    }
+
+    PDFPage *page = [self.document pageAtIndex:documentPage1 - 1];
+    NSRect media = [page boundsForBox:kPDFDisplayBoxMediaBox];
+    CGFloat mw = NSWidth(media);
+    CGFloat mh = NSHeight(media);
+    if (!(mw > 1.0) || !(mh > 1.0) || !isfinite(mw) || !isfinite(mh)) {
+        return NO;
+    }
+
+    CGFloat longSide = MAX(mw, mh);
+    CGFloat sampleScale = (CGFloat)PERFECT_PRINT_INK_SAMPLE_MAX / longSide;
+    if (sampleScale > 1.0) {
+        sampleScale = 1.0;
+    }
+    uint32_t pixW = (uint32_t)MAX(ceil(mw * sampleScale), 1.0);
+    uint32_t pixH = (uint32_t)MAX(ceil(mh * sampleScale), 1.0);
+    uint32_t stride = pixW * 4;
+    NSMutableData *data = [NSMutableData dataWithLength:(NSUInteger)stride * (NSUInteger)pixH];
+    if (!data) {
+        return NO;
+    }
+    memset(data.mutableBytes, 0xFF, data.length);
+
+    CGColorSpaceRef colorSpace = CGColorSpaceCreateDeviceRGB();
+    if (!colorSpace) {
+        return NO;
+    }
+    CGContextRef ctx = CGBitmapContextCreate(
+        data.mutableBytes,
+        pixW,
+        pixH,
+        8,
+        stride,
+        colorSpace,
+        kCGImageAlphaPremultipliedLast | kCGBitmapByteOrder32Big);
+    CGColorSpaceRelease(colorSpace);
+    if (!ctx) {
+        return NO;
+    }
+
+    // CGBitmap first row is device y = 0 (bottom). Flip so PDF top lands in
+    // row 0 — the top-down convention PerfectPrintCountInkPixels expects.
+    CGContextTranslateCTM(ctx, 0, (CGFloat)pixH);
+    CGContextScaleCTM(ctx, (CGFloat)pixW / mw, -(CGFloat)pixH / mh);
+    CGContextTranslateCTM(ctx, -NSMinX(media), -NSMinY(media));
+    [page drawWithBox:kPDFDisplayBoxMediaBox toContext:ctx];
+    CGContextRelease(ctx);
+
+    self.inkSampleBytes[key] = data;
+    self.inkSampleSize[key] = [NSValue valueWithSize:NSMakeSize(pixW, pixH)];
+    if (outPixels) *outPixels = data.bytes;
+    if (outWidth) *outWidth = pixW;
+    if (outHeight) *outHeight = pixH;
+    return YES;
+}
+
+/// Geometric poster grid with blank (no-ink) tiles removed.
+/// “n of N” and knowsPageRange use the post-filter count.
+- (PerfectPrintPosterKeptGrid)keptGridForDocumentPage:(NSUInteger)documentPage1
+                                                media:(NSRect)media {
+    NSRect content = [self contentBounds];
+    CGFloat scale = [self scaleForMedia:media];
+    const uint8_t *pixels = NULL;
+    uint32_t pixW = 0;
+    uint32_t pixH = 0;
+    if (![self inkSampleForDocumentPage:documentPage1
+                                pixels:&pixels
+                                 width:&pixW
+                                height:&pixH]) {
+        pixels = NULL;
+        pixW = 0;
+        pixH = 0;
+    }
+    PerfectPrintPosterKeptGrid kept;
+    PerfectPrintFilterPosterTiles(
+        NSWidth(media),
+        NSHeight(media),
+        scale,
+        NSWidth(content),
+        NSHeight(content),
+        pixels,
+        pixW,
+        pixH,
+        pixW * 4,
+        4,
+        &kept);
+    return kept;
+}
+
 /// Live page count: each selected source page becomes 1 tile when it fits
 /// at the current Scale, or a row-major poster grid when it overflows.
-/// Recomputed every call so the panel Scale field changes N.
+/// Blank tiles (white margin only) are dropped. Recomputed every call so
+/// the panel Scale field changes N.
 - (NSUInteger)currentPrintPageCount {
     if (!self.document || self.document.pageCount == 0 || self.pageNumbers.count == 0) {
         return 0;
     }
     NSUInteger total = 0;
     for (NSNumber *number in self.pageNumbers) {
-        NSRect media = [self mediaForDocumentPage:number.unsignedIntegerValue];
-        PerfectPrintPosterGrid grid = [self gridForMedia:media];
-        total += grid.pages;
+        NSUInteger documentPage1 = number.unsignedIntegerValue;
+        NSRect media = [self mediaForDocumentPage:documentPage1];
+        PerfectPrintPosterKeptGrid kept = [self keptGridForDocumentPage:documentPage1 media:media];
+        total += kept.kept;
     }
     return total > 0 ? total : 1;
 }
@@ -146,11 +270,11 @@ typedef struct {
     return YES;
 }
 
-/// Map a 1-based print-operation page onto a source PDF page and poster tile.
+/// Map a 1-based print-operation page onto a source PDF page and a kept tile.
 - (BOOL)resolvePrintPage:(NSInteger)pageNumber
            documentPage:(NSUInteger *)outDocumentPage1
-              tileIndex:(uint32_t *)outTileIndex
-                   grid:(PerfectPrintPosterGrid *)outGrid
+              keptTile:(PerfectPrintPosterKeptTile *)outKeptTile
+              keptGrid:(PerfectPrintPosterKeptGrid *)outKeptGrid
                   media:(NSRect *)outMedia {
     if (pageNumber < 1) {
         return NO;
@@ -159,15 +283,15 @@ typedef struct {
     for (NSNumber *number in self.pageNumbers) {
         NSUInteger documentPage1 = number.unsignedIntegerValue;
         NSRect media = [self mediaForDocumentPage:documentPage1];
-        PerfectPrintPosterGrid grid = [self gridForMedia:media];
-        if (remaining <= grid.pages) {
+        PerfectPrintPosterKeptGrid kept = [self keptGridForDocumentPage:documentPage1 media:media];
+        if (remaining <= kept.kept) {
             if (outDocumentPage1) *outDocumentPage1 = documentPage1;
-            if (outTileIndex) *outTileIndex = (uint32_t)(remaining - 1);
-            if (outGrid) *outGrid = grid;
+            if (outKeptTile) *outKeptTile = kept.tiles[remaining - 1];
+            if (outKeptGrid) *outKeptGrid = kept;
             if (outMedia) *outMedia = media;
             return YES;
         }
-        remaining -= grid.pages;
+        remaining -= kept.kept;
     }
     return NO;
 }
@@ -189,16 +313,16 @@ typedef struct {
 }
 
 /// Margin-only chrome. Drawn only when this source page split into more
-/// than one tile (we created the poster). Hidden when the job is 1 page.
-/// Families should not bake "n of N" into a single full-chart PDF — the
-/// label here is the post-scale count. Pre-tiled paper-sized pages do not
-/// split at Fit/100%, so we will not double their baked chrome.
-- (void)drawPosterChromeForTile:(const PerfectPrintPosterTile *)tile
-                           grid:(PerfectPrintPosterGrid)grid
+/// than one *kept* tile (we created the poster). Hidden when the job is
+/// 1 page. Families should not bake "n of N" into a single full-chart
+/// PDF — the label here is the post-filter count. Pre-tiled paper-sized
+/// pages do not split at Fit/100%, so we will not double their baked chrome.
+- (void)drawPosterChromeForKept:(const PerfectPrintPosterKeptTile *)kept
+                      keptCount:(uint32_t)keptCount
                     pageNumber:(NSInteger)pageNumber
                      totalPages:(NSUInteger)totalPages
                     contentRect:(NSRect)contentInView {
-    if (!tile || grid.pages <= 1 || totalPages <= 1) {
+    if (!kept || keptCount <= 1 || totalPages <= 1) {
         return;
     }
 
@@ -213,8 +337,8 @@ typedef struct {
     CGFloat ch = NSHeight(contentInView);
 
     [ink setStroke];
-    // Right-edge tick when another column joins to the right.
-    if (tile->col + 1 < grid.cols) {
+    // Right-edge tick only when the neighboring kept tile still adjoins.
+    if (kept->join_right) {
         NSBezierPath *path = [NSBezierPath bezierPath];
         path.lineWidth = 0.4;
         CGFloat midY = cy + (ch - tick) * 0.5;
@@ -222,8 +346,9 @@ typedef struct {
         [path lineToPoint:NSMakePoint(cx + cw + 1.0 + tick, midY)];
         [path stroke];
     }
-    // Bottom-edge tick when another row joins below (lower y, view is y-up).
-    if (tile->row + 1 < grid.rows) {
+    // Bottom-edge tick only when the neighboring kept tile still adjoins
+    // (lower y; view is y-up).
+    if (kept->join_bottom) {
         NSBezierPath *path = [NSBezierPath bezierPath];
         path.lineWidth = 0.4;
         CGFloat midX = cx + (cw - tick) * 0.5;
@@ -258,14 +383,15 @@ typedef struct {
     NSInteger pageNumber = operation ? operation.currentPage : 1;
 
     NSUInteger documentPage1 = 0;
-    uint32_t tileIndex = 0;
-    PerfectPrintPosterGrid grid;
+    PerfectPrintPosterKeptTile keptTile;
+    PerfectPrintPosterKeptGrid keptGrid;
     NSRect media;
-    memset(&grid, 0, sizeof(grid));
+    memset(&keptTile, 0, sizeof(keptTile));
+    memset(&keptGrid, 0, sizeof(keptGrid));
     if (![self resolvePrintPage:pageNumber
                   documentPage:&documentPage1
-                     tileIndex:&tileIndex
-                          grid:&grid
+                      keptTile:&keptTile
+                      keptGrid:&keptGrid
                          media:&media]) {
         return;
     }
@@ -280,17 +406,7 @@ typedef struct {
         NSWidth(content),
         NSHeight(content));
 
-    PerfectPrintPosterTile tile;
-    if (!PerfectPrintPosterTileAt(
-            tileIndex,
-            NSWidth(media),
-            NSHeight(media),
-            scale,
-            NSWidth(content),
-            NSHeight(content),
-            &tile)) {
-        return;
-    }
+    PerfectPrintPosterTile tile = keptTile.tile;
 
     // --- AppKit coordinate contract (read this before changing anything
     // below) ---
@@ -323,8 +439,8 @@ typedef struct {
     CGContextRestoreGState(context);
 
     NSUInteger totalPages = [self currentPrintPageCount];
-    [self drawPosterChromeForTile:&tile
-                             grid:grid
+    [self drawPosterChromeForKept:&keptTile
+                        keptCount:keptGrid.kept
                        pageNumber:pageNumber
                        totalPages:totalPages
                       contentRect:contentInView];

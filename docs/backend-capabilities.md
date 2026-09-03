@@ -61,16 +61,19 @@ lives on the native panel only.
 | Panel Scale | Result |
 |-------------|--------|
 | Fit, or any scale that fits the imageable content area | **1 page** |
-| Scale up | **N poster tiles** (row-major: left→right, then top→bottom) |
+| Scale up | **N poster tiles** (row-major: left→right, then top→bottom). Blank tiles with no chart ink are omitted |
 | Scale down | **fewer tiles**, 1 when the content fits |
 
 Each print page is a contiguous crop of the source PDF page, not a copy of the
-whole page. Tiles do not overlap through content. The 28pt page margin is the
-tape/join strip; optional ≤8pt registration ticks and a margin-only “n of N”
-label (hidden when N = 1) live in that band. The label is the **post-scale**
-page count. Callers must not bake a stale “n of N” into a single full-chart
-page (Families may still draw chrome on a pre-tiled PDF — the view only adds
-chrome when *it* splits a source page).
+whole page. Tiles do not overlap through content. After the scale-based
+rectangle is built, tiles whose crop is only page-fill white (`#fff` /
+Families `PRINT_PAGE_FILL`) are dropped so a tall×narrow chart does not print
+blank side sheets. “n of N” is the **post-filter** count (still hidden when
+N = 1). Registration ticks are drawn only on edges that still adjoin another
+kept tile. The 28pt page margin is the tape/join strip; optional ≤8pt ticks
+and the margin-only label live in that band. Callers must not bake a stale
+“n of N” into a single full-chart page (Families may still draw chrome on a
+pre-tiled PDF — the view only adds chrome when *it* splits a source page).
 
 **Families / chart documents:** emit a **single-page PDF** whose MediaBox is
 the full chart (1 image pixel = 1 point, or the natural size in points). Do
