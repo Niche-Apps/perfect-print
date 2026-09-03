@@ -151,7 +151,8 @@ typedef struct {
 /// Copies, Pages, Paper Size, Orientation, Scale, Preview, Page Setup,
 /// and the PDF menu. Two-sided/duplex is not a dedicated options bit;
 /// AppKit surfaces it on the Copies row when the destination printer
-/// supports it (`ShowsCopies` plus `PMSetDuplex` / `NSPrintTwoSided`).
+/// supports it (`ShowsCopies` plus `PMSetDuplex`). `NSPrintTwoSided` is
+/// not used: it is undeclared on current SDKs (MacOSX15.4 / MacOSX26).
 /// Color vs B&W is left to the printer's own system controls.
 static NSPrintPanelOptions PerfectPrintStandardPanelOptions(void) {
     return NSPrintPanelShowsCopies
@@ -165,10 +166,12 @@ static NSPrintPanelOptions PerfectPrintStandardPanelOptions(void) {
 
 /// Apply PrintSettings paper/orientation as *defaults* only.
 ///
-/// Prefer a named paper from the current printer so the panel's Paper Size
-/// popup can switch among standard sizes (Letter, Legal, Tabloid, A4, A3,
-/// …) instead of locking onto a one-off custom size. Orientation is
-/// re-applied after `paperName` because selecting a paper can reset it.
+/// Sets `paperSize` and orientation from the requested dimensions.
+/// `-[NSPrinter paperList]` is not called: that property is absent from
+/// current SDKs (MacOSX15.4 / MacOSX26) and `NSPrinter` does not respond
+/// to it at runtime. `ShowsPaperSize` still lets the user pick a named
+/// printer paper in the panel. Orientation is re-applied after
+/// `paperSize` because selecting a paper can reset it.
 static void PerfectPrintApplyDefaultPaper(NSPrintInfo *info, NSSize requested, bool landscape) {
     NSPaperOrientation orientation =
         landscape ? NSPaperOrientationLandscape : NSPaperOrientationPortrait;
@@ -179,26 +182,7 @@ static void PerfectPrintApplyDefaultPaper(NSPrintInfo *info, NSSize requested, b
         return;
     }
 
-    NSPrinter *printer = info.printer;
-    NSString *matched = nil;
-    if (printer) {
-        CGFloat wantW = MIN(requested.width, requested.height);
-        CGFloat wantH = MAX(requested.width, requested.height);
-        for (NSString *name in printer.paperList) {
-            NSSize size = [printer pageSizeForPaper:name];
-            CGFloat w = MIN(size.width, size.height);
-            CGFloat h = MAX(size.width, size.height);
-            if (fabs(w - wantW) <= 2.0 && fabs(h - wantH) <= 2.0) {
-                matched = name;
-                break;
-            }
-        }
-    }
-    if (matched) {
-        info.paperName = matched;
-    } else {
-        info.paperSize = requested;
-    }
+    info.paperSize = requested;
     info.orientation = orientation;
 }
 
@@ -222,7 +206,6 @@ static void PerfectPrintConfigurePrintInfo(NSPrintInfo *info, PerfectPrintNative
 
     info.dictionary[NSPrintCopies] = @(MAX(settings.copies, 1));
     info.dictionary[NSPrintMustCollate] = @(settings.collate);
-    info.dictionary[NSPrintTwoSided] = @(settings.duplex != 0);
 
     PMPrintSettings pmSettings = (PMPrintSettings)info.PMPrintSettings;
     PMSetCopies(pmSettings, MAX(settings.copies, 1), false);
