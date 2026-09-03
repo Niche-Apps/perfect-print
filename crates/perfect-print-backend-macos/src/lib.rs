@@ -1,12 +1,13 @@
 //! macOS native print backend.
 //!
-//! Uses NSTask/Process to bridge to macOS command-line print tools:
+//! Interactive jobs open a standard `NSPrintPanel` via `NSPrintOperation`
+//! (`src/native_print.m`). PrintSettings paper size, orientation, duplex,
+//! and scaling are defaults only — the user can change them in the sheet.
+//!
+//! Unattended jobs still use the CUPS CLI bridge:
 //! - `lpstat` for printer enumeration
 //! - `lpoptions` for printer capabilities
-//! - `NSPrintPanel` via a small native helper (future)
-//!
-//! For now, provides full printer enumeration and capability detection
-//! via system tools, with a path to native panel integration.
+//! - `lp` / `cancel` for submission and queue management
 
 use perfect_print_core::page::PageSize;
 use perfect_print_dialog::{
@@ -33,6 +34,31 @@ struct NativePrintSettings {
     last_page: u32,
 }
 
+/// `NSPrintPanelOptions` bits applied to interactive jobs.
+///
+/// Must stay in sync with `PerfectPrintStandardPanelOptions()` in
+/// `native_print.m`. Values are from `<AppKit/NSPrintPanel.h>`.
+pub const NATIVE_PRINT_PANEL_OPTIONS: u32 = {
+    const SHOWS_COPIES: u32 = 1 << 0;
+    const SHOWS_PAGE_RANGE: u32 = 1 << 1;
+    const SHOWS_PAPER_SIZE: u32 = 1 << 2;
+    const SHOWS_ORIENTATION: u32 = 1 << 3;
+    const SHOWS_SCALING: u32 = 1 << 4;
+    const SHOWS_PAGE_SETUP_ACCESSORY: u32 = 1 << 8;
+    const SHOWS_PREVIEW: u32 = 1 << 17;
+    SHOWS_COPIES
+        | SHOWS_PAGE_RANGE
+        | SHOWS_PAPER_SIZE
+        | SHOWS_ORIENTATION
+        | SHOWS_SCALING
+        | SHOWS_PAGE_SETUP_ACCESSORY
+        | SHOWS_PREVIEW
+};
+
+/// `NSPrintingPaginationModeClip`. Interactive jobs must not force this —
+/// Clip discarded the panel Scale field.
+pub const NATIVE_PRINT_PAGINATION_CLIP: u32 = 2;
+
 #[cfg(target_os = "macos")]
 unsafe extern "C" {
     fn perfect_print_pdf_dialog(
@@ -43,9 +69,23 @@ unsafe extern "C" {
         selected_pages: *const u32,
         selected_page_count: usize,
     ) -> i32;
+
+    fn perfect_print_native_panel_options_mask() -> u32;
+
+    fn perfect_print_native_inspect_panel_defaults(
+        out_options: *mut u32,
+        out_horizontal_pagination: *mut u32,
+        out_vertical_pagination: *mut u32,
+    ) -> i32;
 }
 
 /// Show the native macOS print panel for an in-memory PDF.
+///
+/// The sheet is a standard `NSPrintPanel` (Printer, Presets, Copies, Pages,
+/// Paper Size, Orientation, Scale, Preview, Page Setup, PDF menu). Settings
+/// passed here are initial defaults; paper, orientation, scale, and
+/// two-sided remain user-overridable in the panel. Fit-to-page is the
+/// default scaling path.
 ///
 /// Returns `Ok(true)` when the user submits the job and `Ok(false)` when the
 /// panel is cancelled. The native bridge always runs the panel on AppKit's main
@@ -509,6 +549,74 @@ mod tests {
         let result =
             print_pdf_bytes_with_dialog(b"not a pdf", Some("Invalid"), &PrintSettings::default());
         assert!(matches!(result, Err(PrintError::PrintFailed(_))));
+    }
+
+    #[test]
+    fn native_panel_options_mask_includes_required_controls() {
+        assert_ne!(NATIVE_PRINT_PANEL_OPTIONS & (1 << 0), 0, "ShowsCopies");
+        assert_ne!(NATIVE_PRINT_PANEL_OPTIONS & (1 << 1), 0, "ShowsPageRange");
+        assert_ne!(NATIVE_PRINT_PANEL_OPTIONS & (1 << 2), 0, "ShowsPaperSize");
+        assert_ne!(NATIVE_PRINT_PANEL_OPTIONS & (1 << 3), 0, "ShowsOrientation");
+        assert_ne!(NATIVE_PRINT_PANEL_OPTIONS & (1 << 4), 0, "ShowsScaling");
+        assert_ne!(
+            NATIVE_PRINT_PANEL_OPTIONS & (1 << 8),
+            0,
+            "ShowsPageSetupAccessory"
+        );
+        assert_ne!(NATIVE_PRINT_PANEL_OPTIONS & (1 << 17), 0, "ShowsPreview");
+    }
+
+    #[test]
+    fn native_settings_pass_paper_orientation_and_scaling_as_defaults() {
+        let settings = PrintSettings::default()
+            .paper_size(PageSize::A3)
+            .orientation(PageOrientation::Landscape)
+            .scaling(PrintScaling::FitToPage)
+            .duplex(DuplexMode::LongEdge);
+        let page_size = settings.paper_size.to_size();
+        assert_eq!(page_size.width, PageSize::A3.to_size().width);
+        assert_eq!(page_size.height, PageSize::A3.to_size().height);
+        assert!(matches!(settings.orientation, PageOrientation::Landscape));
+        assert!(matches!(settings.scaling, PrintScaling::FitToPage));
+        // The native helper applies these to NSPrintInfo before the sheet;
+        // printPanel.options (ShowsPaperSize/Orientation/Scaling) keep them
+        // user-overridable. This mapping must not treat them as locked.
+        assert_ne!(NATIVE_PRINT_PANEL_OPTIONS & (1 << 2), 0);
+        assert_ne!(NATIVE_PRINT_PANEL_OPTIONS & (1 << 3), 0);
+        assert_ne!(NATIVE_PRINT_PANEL_OPTIONS & (1 << 4), 0);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn native_panel_applies_standard_options_and_does_not_force_clip() {
+        let mut options = 0u32;
+        let mut horizontal = 0u32;
+        let mut vertical = 0u32;
+        let rc = unsafe {
+            perfect_print_native_inspect_panel_defaults(
+                &mut options,
+                &mut horizontal,
+                &mut vertical,
+            )
+        };
+        assert_eq!(rc, 1, "inspect helper should configure a print operation");
+        assert_eq!(
+            unsafe { perfect_print_native_panel_options_mask() },
+            NATIVE_PRINT_PANEL_OPTIONS
+        );
+        assert_eq!(
+            options & NATIVE_PRINT_PANEL_OPTIONS,
+            NATIVE_PRINT_PANEL_OPTIONS,
+            "operation.printPanel.options missing required bits: {options:#x}"
+        );
+        assert_ne!(
+            horizontal, NATIVE_PRINT_PAGINATION_CLIP,
+            "horizontal pagination must not be Clip"
+        );
+        assert_ne!(
+            vertical, NATIVE_PRINT_PAGINATION_CLIP,
+            "vertical pagination must not be Clip"
+        );
     }
 
     #[test]

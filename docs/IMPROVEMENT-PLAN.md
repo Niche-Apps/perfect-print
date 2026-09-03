@@ -581,3 +581,24 @@ Fixed, TDD (`crates/perfect-print-html/src/convert.rs`):
   `border-top` added to the supported CSS properties list; new
   `## background/border-top on positioned boxes` section documents the
   paint-order guarantee and the flow-block limitation (with rationale).
+
+## 2026-09-03: macOS native print panel shows a full standard NSPrintPanel
+
+`NSPrintOperation` in `native_print.m` set `showsPrintPanel = YES` but never
+set `printPanel.options`, and forced `NSPrintingPaginationModeClip` on both
+axes. Callers (notably Niche-Apps/Families) got a stripped panel: no Paper
+Size, Orientation, Scale, or Page Setup, and Clip discarded the Scale field
+so it did nothing even if shown. Duplex was applied via `PMSetDuplex` but
+not exposed.
+
+Fixed: `operation.printPanel.options` is OR'd with ShowsCopies, PageRange,
+PaperSize, Orientation, Scaling, Preview, and PageSetupAccessory. Pagination
+is Automatic (Clip is not forced). `scaleForMedia:` multiplies by
+`printInfo.scalingFactor` so the panel Scale field actually changes output.
+Paper/orientation are applied as named-paper defaults when the printer has
+a match, not as a locked custom size. Two-sided stays on the system Copies
+row (`ShowsCopies` + `PMSetDuplex` / `NSPrintTwoSided`). No custom sheet and
+no Color vs B&W accessory. Save-to-PDF / `lp` job APIs are unchanged.
+`docs/backend-capabilities.md` records the options mask. Hermetic inspect
+helper reads `operation.printPanel.options` and pagination without running
+the sheet.

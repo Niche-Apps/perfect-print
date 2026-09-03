@@ -4,6 +4,7 @@
 #import <ApplicationServices/ApplicationServices.h>
 #include <stdbool.h>
 #include <stdint.h>
+#include <string.h>
 #include <dispatch/dispatch.h>
 
 typedef struct {
@@ -68,13 +69,24 @@ typedef struct {
     NSRect imageable = operation.printInfo.imageablePageBounds;
     CGFloat sx = NSWidth(imageable) / MAX(NSWidth(media), 1.0);
     CGFloat sy = NSHeight(imageable) / MAX(NSHeight(media), 1.0);
+    CGFloat base = MIN(sx, sy); // FitToPage
     switch (self.scalingMode) {
-        case 0: return MIN(sx, sy);                    // FitToPage
-        case 1: return MAX(sx, sy);                     // FillPage
-        case 2: return 1.0;                              // None
-        case 3: return MAX(self.customScale, 0.01);      // Custom
-        default: return MIN(sx, sy);
+        case 0: base = MIN(sx, sy); break;                 // FitToPage
+        case 1: base = MAX(sx, sy); break;                  // FillPage
+        case 2: base = 1.0; break;                           // None
+        case 3: base = MAX(self.customScale, 0.01); break;   // Custom
+        default: break;
     }
+    // This view owns pagination via knowsPageRange:/rectForPage:, so the
+    // native panel's Scale field (NSPrintInfo.scalingFactor) has to be
+    // folded in here — AppKit will not reliably apply it on top of a
+    // custom-paginated view, and NSPrintingPaginationModeClip used to
+    // discard it entirely. Fit-to-page remains the default `base`.
+    CGFloat panelScale = operation.printInfo.scalingFactor;
+    if (panelScale <= 0.0 || !isfinite(panelScale)) {
+        panelScale = 1.0;
+    }
+    return base * panelScale;
 }
 
 - (NSRect)rectForPage:(NSInteger)pageNumber {
@@ -133,6 +145,113 @@ typedef struct {
 
 @end
 
+/// Standard NSPrintPanel options for interactive jobs.
+///
+/// The system panel (not a custom sheet) then shows Printer, Presets,
+/// Copies, Pages, Paper Size, Orientation, Scale, Preview, Page Setup,
+/// and the PDF menu. Two-sided/duplex is not a dedicated options bit;
+/// AppKit surfaces it on the Copies row when the destination printer
+/// supports it (`ShowsCopies` plus `PMSetDuplex` / `NSPrintTwoSided`).
+/// Color vs B&W is left to the printer's own system controls.
+static NSPrintPanelOptions PerfectPrintStandardPanelOptions(void) {
+    return NSPrintPanelShowsCopies
+        | NSPrintPanelShowsPageRange
+        | NSPrintPanelShowsPaperSize
+        | NSPrintPanelShowsOrientation
+        | NSPrintPanelShowsScaling
+        | NSPrintPanelShowsPreview
+        | NSPrintPanelShowsPageSetupAccessory;
+}
+
+/// Apply PrintSettings paper/orientation as *defaults* only.
+///
+/// Prefer a named paper from the current printer so the panel's Paper Size
+/// popup can switch among standard sizes (Letter, Legal, Tabloid, A4, A3,
+/// …) instead of locking onto a one-off custom size. Orientation is
+/// re-applied after `paperName` because selecting a paper can reset it.
+static void PerfectPrintApplyDefaultPaper(NSPrintInfo *info, NSSize requested, bool landscape) {
+    NSPaperOrientation orientation =
+        landscape ? NSPaperOrientationLandscape : NSPaperOrientationPortrait;
+    info.orientation = orientation;
+
+    if (!(requested.width > 0.0 && requested.height > 0.0 &&
+          isfinite(requested.width) && isfinite(requested.height))) {
+        return;
+    }
+
+    NSPrinter *printer = info.printer;
+    NSString *matched = nil;
+    if (printer) {
+        CGFloat wantW = MIN(requested.width, requested.height);
+        CGFloat wantH = MAX(requested.width, requested.height);
+        for (NSString *name in printer.paperList) {
+            NSSize size = [printer pageSizeForPaper:name];
+            CGFloat w = MIN(size.width, size.height);
+            CGFloat h = MAX(size.width, size.height);
+            if (fabs(w - wantW) <= 2.0 && fabs(h - wantH) <= 2.0) {
+                matched = name;
+                break;
+            }
+        }
+    }
+    if (matched) {
+        info.paperName = matched;
+    } else {
+        info.paperSize = requested;
+    }
+    info.orientation = orientation;
+}
+
+static void PerfectPrintConfigurePrintInfo(NSPrintInfo *info, PerfectPrintNativeSettings settings) {
+    PerfectPrintApplyDefaultPaper(
+        info,
+        NSMakeSize(settings.paper_width, settings.paper_height),
+        settings.landscape);
+
+    info.horizontallyCentered = YES;
+    info.verticallyCentered = YES;
+    // Automatic — do not force Clip. Clip discarded the panel Scale field
+    // for this knowsPageRange:/rectForPage: view. Fit-to-page remains the
+    // default content path via PerfectPrintPDFView.scalingMode (mode 0).
+    info.horizontalPagination = NSPrintingPaginationModeAutomatic;
+    info.verticalPagination = NSPrintingPaginationModeAutomatic;
+
+    if (settings.scaling == 3 && isfinite(settings.custom_scale) && settings.custom_scale > 0.0) {
+        info.scalingFactor = settings.custom_scale;
+    }
+
+    info.dictionary[NSPrintCopies] = @(MAX(settings.copies, 1));
+    info.dictionary[NSPrintMustCollate] = @(settings.collate);
+    info.dictionary[NSPrintTwoSided] = @(settings.duplex != 0);
+
+    PMPrintSettings pmSettings = (PMPrintSettings)info.PMPrintSettings;
+    PMSetCopies(pmSettings, MAX(settings.copies, 1), false);
+    PMSetCollate(pmSettings, settings.collate);
+    PMDuplexMode duplex = kPMDuplexNone;
+    if (settings.duplex == 1) duplex = kPMDuplexNoTumble;
+    if (settings.duplex == 2) duplex = kPMDuplexTumble;
+    PMSetDuplex(pmSettings, duplex);
+    if (settings.color_mode == 0) {
+        PMPrintSettingsSetValue(pmSettings, CFSTR("ColorModel"), CFSTR("RGB"), false);
+        PMPrintSettingsSetValue(pmSettings, CFSTR("OutputMode"), CFSTR("Color"), false);
+    } else {
+        PMPrintSettingsSetValue(pmSettings, CFSTR("ColorModel"), CFSTR("Gray"), false);
+        PMPrintSettingsSetValue(pmSettings, CFSTR("OutputMode"), CFSTR("Grayscale"), false);
+    }
+    [info updateFromPMPrintSettings];
+}
+
+static void PerfectPrintConfigurePrintOperation(NSPrintOperation *operation, const char *titleUtf8) {
+    if (titleUtf8) {
+        NSString *title = [NSString stringWithUTF8String:titleUtf8];
+        if (title.length > 0) operation.jobTitle = title;
+    }
+    operation.showsPrintPanel = YES;
+    operation.showsProgressPanel = YES;
+    NSPrintPanel *panel = operation.printPanel;
+    panel.options = panel.options | PerfectPrintStandardPanelOptions();
+}
+
 static int32_t perfect_print_run_pdf_dialog(
     const uint8_t *pdfBytes,
     size_t pdfLength,
@@ -151,31 +270,17 @@ static int32_t perfect_print_run_pdf_dialog(
         NSUInteger documentPageCount = document.pageCount;
 
         // AppKit requires that every rect -rectForPage: returns fit within
-        // the view's own bounds. -rectForPage: (see above) returns the
-        // page's media box scaled by -scaleForMedia:, but at this point we
-        // don't yet have a live NSPrintOperation (it's created below, after
-        // the view), so -scaleForMedia:'s FitToPage/FillPage ratios --
-        // which depend on operation.printInfo.imageablePageBounds -- aren't
-        // computable yet. We approximate conservatively instead:
-        //   - FitToPage/FillPage/None (modes 0/1/2): these scale by a ratio
-        //     computed against the *actual* printer's imageable bounds,
-        //     which are typically <= the requested paper size, so ratios
-        //     are usually <= 1. We size the frame to the largest page's raw
-        //     media size (multiplier 1.0), matching the pre-existing
-        //     behavior for the (previously page-1-only) frame.
-        //   - Custom (mode 3): the multiplier is known up front (it's the
-        //     user-requested custom_scale), so size the frame to the
-        //     largest media size times max(1.0, custom_scale) -- covering
-        //     both "shrink" (< 1.0, where raw media size already suffices)
-        //     and "enlarge" (> 1.0, where the scaled page is bigger than
-        //     any single page's own media box) cases.
-        // If a real printer's imageable bounds ever produce a FitToPage/
-        // FillPage ratio > 1 (unusual, but possible for tiny custom paper
-        // sizes), AppKit will clip that page's content to the view bounds
-        // rather than crash; this is a sizing approximation, not a
-        // correctness-critical computation.
-        CGFloat frameScaleMultiplier =
-            (settings.scaling == 3) ? MAX(settings.custom_scale, 1.0) : 1.0;
+        // the view's own bounds. -rectForPage: returns the page's media box
+        // scaled by -scaleForMedia: (FitToPage/FillPage/None/Custom, then
+        // multiplied by the panel's scalingFactor). We don't have a live
+        // NSPrintOperation yet, so imageable-bounds ratios aren't known.
+        // Size the frame to the largest page times at least 4.0 so the
+        // native Scale field can enlarge up to 400% without violating the
+        // bounds contract; Custom(scale) uses max(4.0, custom_scale).
+        CGFloat frameScaleMultiplier = 4.0;
+        if (settings.scaling == 3) {
+            frameScaleMultiplier = MAX(frameScaleMultiplier, MAX(settings.custom_scale, 1.0));
+        }
         CGFloat maxMediaWidth = 1.0;
         CGFloat maxMediaHeight = 1.0;
         for (NSUInteger i = 0; i < documentPageCount; i++) {
@@ -190,8 +295,16 @@ static int32_t perfect_print_run_pdf_dialog(
 
         PerfectPrintPDFView *view = [[PerfectPrintPDFView alloc] initWithFrame:frame];
         view.document = document;
-        view.scalingMode = settings.scaling;
-        view.customScale = settings.custom_scale;
+        // Custom(scale) is seeded onto printInfo.scalingFactor so the
+        // panel Scale field shows that percentage and can change it.
+        // Other modes keep their view-side default (FitToPage is 0).
+        if (settings.scaling == 3) {
+            view.scalingMode = 2;
+            view.customScale = 1.0;
+        } else {
+            view.scalingMode = settings.scaling;
+            view.customScale = settings.custom_scale;
+        }
 
         NSMutableArray<NSNumber *> *pageNumbers = [NSMutableArray array];
         if (settings.page_range_kind == 1) {
@@ -213,43 +326,10 @@ static int32_t perfect_print_run_pdf_dialog(
         view.pageNumbers = pageNumbers;
 
         NSPrintInfo *info = [[NSPrintInfo sharedPrintInfo] copy];
-        NSSize requestedPaper = NSMakeSize(settings.paper_width, settings.paper_height);
-
-        if (requestedPaper.width > 0.0 && requestedPaper.height > 0.0 &&
-            isfinite(requestedPaper.width) && isfinite(requestedPaper.height)) {
-            info.paperSize = requestedPaper;
-        }
-        info.orientation = settings.landscape ? NSPaperOrientationLandscape : NSPaperOrientationPortrait;
-        info.horizontallyCentered = YES;
-        info.verticallyCentered = YES;
-        info.horizontalPagination = NSPrintingPaginationModeClip;
-        info.verticalPagination = NSPrintingPaginationModeClip;
-        info.dictionary[NSPrintCopies] = @(MAX(settings.copies, 1));
-        info.dictionary[NSPrintMustCollate] = @(settings.collate);
-
-        PMPrintSettings pmSettings = (PMPrintSettings)info.PMPrintSettings;
-        PMSetCopies(pmSettings, MAX(settings.copies, 1), false);
-        PMSetCollate(pmSettings, settings.collate);
-        PMDuplexMode duplex = kPMDuplexNone;
-        if (settings.duplex == 1) duplex = kPMDuplexNoTumble;
-        if (settings.duplex == 2) duplex = kPMDuplexTumble;
-        PMSetDuplex(pmSettings, duplex);
-        if (settings.color_mode == 0) {
-            PMPrintSettingsSetValue(pmSettings, CFSTR("ColorModel"), CFSTR("RGB"), false);
-            PMPrintSettingsSetValue(pmSettings, CFSTR("OutputMode"), CFSTR("Color"), false);
-        } else {
-            PMPrintSettingsSetValue(pmSettings, CFSTR("ColorModel"), CFSTR("Gray"), false);
-            PMPrintSettingsSetValue(pmSettings, CFSTR("OutputMode"), CFSTR("Grayscale"), false);
-        }
-        [info updateFromPMPrintSettings];
+        PerfectPrintConfigurePrintInfo(info, settings);
 
         NSPrintOperation *operation = [NSPrintOperation printOperationWithView:view printInfo:info];
-        if (titleUtf8) {
-            NSString *title = [NSString stringWithUTF8String:titleUtf8];
-            if (title.length > 0) operation.jobTitle = title;
-        }
-        operation.showsPrintPanel = YES;
-        operation.showsProgressPanel = YES;
+        PerfectPrintConfigurePrintOperation(operation, titleUtf8);
         BOOL accepted = [operation runOperation];
         return accepted ? 1 : 0;
     }
@@ -278,4 +358,44 @@ int32_t perfect_print_pdf_dialog(
             pdfBytes, pdfLength, titleUtf8, settings, selectedPages, selectedPageCount);
     });
     return result;
+}
+
+uint32_t perfect_print_native_panel_options_mask(void) {
+    return (uint32_t)PerfectPrintStandardPanelOptions();
+}
+
+/// Configure a throwaway `NSPrintOperation` the same way interactive jobs
+/// do and read back `printPanel.options` plus pagination. Does not run the
+/// operation or show a sheet — used by Rust tests on macOS.
+int32_t perfect_print_native_inspect_panel_defaults(
+    uint32_t *out_options,
+    uint32_t *out_horizontal_pagination,
+    uint32_t *out_vertical_pagination
+) {
+    @autoreleasepool {
+        PerfectPrintNativeSettings settings;
+        memset(&settings, 0, sizeof(settings));
+        settings.copies = 1;
+        settings.paper_width = 612.0;
+        settings.paper_height = 792.0;
+        settings.collate = true;
+
+        NSPrintInfo *info = [[NSPrintInfo sharedPrintInfo] copy];
+        PerfectPrintConfigurePrintInfo(info, settings);
+
+        NSView *view = [[NSView alloc] initWithFrame:NSMakeRect(0, 0, 100, 100)];
+        NSPrintOperation *operation = [NSPrintOperation printOperationWithView:view printInfo:info];
+        PerfectPrintConfigurePrintOperation(operation, "Perfect Print");
+
+        if (out_options) {
+            *out_options = (uint32_t)operation.printPanel.options;
+        }
+        if (out_horizontal_pagination) {
+            *out_horizontal_pagination = (uint32_t)operation.printInfo.horizontalPagination;
+        }
+        if (out_vertical_pagination) {
+            *out_vertical_pagination = (uint32_t)operation.printInfo.verticalPagination;
+        }
+        return 1;
+    }
 }
