@@ -26,7 +26,7 @@ perfect-print has a layered backend architecture. The **core** and **layout** cr
 ## macOS Backend (`perfect-print-backend-macos`)
 
 ### Capabilities
-- **Native interactive printing**: `NSPrintPanel` + `NSPrintOperation` + PDFKit
+- **Native interactive printing**: standard `NSPrintPanel` + `NSPrintOperation` + PDFKit (not a custom sheet)
 - **In-memory PDF submission**: no shared temporary filename or page rasterization
 - **Printer enumeration**: `lpstat -a` — lists all available printers
 - **Default printer**: `lpstat -d` — system default destination
@@ -34,6 +34,27 @@ perfect-print has a layered backend architecture. The **core** and **layout** cr
 - **Print submission**: `lp -d <printer>` — with full settings support
 - **Job tracking**: `lpstat -o` — list pending jobs
 - **Job cancellation**: `cancel <job_id>` — cancel a queued job
+
+### Native `NSPrintPanel` options
+
+Interactive jobs (`print_pdf_bytes_with_dialog` / `NSPrintOperation`) set
+`operation.printPanel.options` to the system mask (OR'd with AppKit defaults):
+
+| Option | Effect |
+|--------|--------|
+| `ShowsCopies` | Copies, plus Two-Sided when the printer supports duplex (`PMSetDuplex` is applied as the default) |
+| `ShowsPageRange` | Pages |
+| `ShowsPaperSize` | Paper size (Letter, Legal, Tabloid 11×17, A4, A3, and other printer papers) |
+| `ShowsOrientation` | Portrait / Landscape |
+| `ShowsScaling` | Scale (Fit-to-page is the default content path; the user can change Scale) |
+| `ShowsPreview` | Preview |
+| `ShowsPageSetupAccessory` | Standard Page Setup accessory |
+
+Printer, Presets, and the PDF menu are provided by `NSPrintPanel` itself.
+`PrintSettings` paper / orientation / scaling / duplex are **defaults** — they
+are not locked after the sheet opens. Pagination is `Automatic` (Clip is not
+forced; Clip discarded the Scale field). Color vs B&W is left to the printer's
+own system controls; this crate does not add a custom color accessory.
 
 ### Supported Print Settings
 | Setting | Flag | Notes |

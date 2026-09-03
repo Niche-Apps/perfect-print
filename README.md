@@ -73,7 +73,7 @@ for warning in &result.warnings {
 - **Image support** — PNG/JPEG loading, rendering in both raster and PDF backends
 - **PDF output** — spec-valid font dictionaries (`/FirstChar`/`/LastChar`/`/Widths` per ISO 32000-1 §9.6.2, so strict print pipelines don't drop text), embedded images (FlateDecode XObjects), embedded fonts with the correct bold/italic face (not a synthetic regular face), and single-face extraction from TrueType Collections (smaller, portable PDFs instead of embedding a whole `.ttc`)
 - **Raster output** — via tiny-skia, any DPI
-- **Print backend** — macOS via CUPS (`lp`/`lpstat`) and a native `NSPrintOperation` dialog with page-accurate placement (no double-applied offset/clipping); other backends are still maturing
+- **Print backend** — macOS via CUPS (`lp`/`lpstat`) and a standard `NSPrintPanel` (`NSPrintOperation`) with Paper Size, Orientation, Scale, Preview, and Page Setup; other backends are still maturing
 - **Visual diff CLI** — pixel-by-pixel PNG comparison with heatmaps
 - **Geometry assertions** — structured checks for page size, content bounds, text baselines
 - **Deterministic output** — identical documents produce byte-identical bytes

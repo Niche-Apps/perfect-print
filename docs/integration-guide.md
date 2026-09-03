@@ -232,7 +232,9 @@ cargo run -p perfect-print-cli -- diagnostics hello --out hello-diag.zip
 ## Platform Notes
 
 ### macOS
-- Interactive printing uses `NSPrintPanel`, `NSPrintOperation`, and PDFKit
+- Interactive printing uses a standard `NSPrintPanel` (`NSPrintOperation` + PDFKit)
+  with Copies, Pages, Paper Size, Orientation, Scale, Preview, Page Setup, and the PDF menu
+- `PrintSettings` paper / orientation / scaling / duplex are initial defaults; the user can change them in the sheet
 - Canonical models render once to in-memory PDF bytes before the panel opens
 - Unattended submission, job tracking, and cancellation remain available through
   the `lpstat`/`lp`/`cancel` bridge
