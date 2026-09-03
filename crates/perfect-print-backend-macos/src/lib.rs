@@ -574,6 +574,56 @@ mod tests {
         assert_ne!(NATIVE_PRINT_PANEL_OPTIONS & (1 << 17), 0, "ShowsPreview");
     }
 
+    /// Current Apple SDKs (MacOSX15.4 / MacOSX26) omit `NSPrinter.paperList`
+    /// and `NSPrintTwoSided`. Families' Xcode 26.6 release build fails if
+    /// either identifier is compiled. This is a source contract because
+    /// this crate's ObjC is not compiled on Linux CI.
+    #[test]
+    fn native_print_omits_removed_sdk_symbols() {
+        let src = include_str!("native_print.m");
+        let code: String = src
+            .lines()
+            .filter(|line| !line.trim_start().starts_with("//"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            !code.contains("paperList"),
+            "native_print.m must not call -[NSPrinter paperList]"
+        );
+        assert!(
+            !code.contains("NSPrintTwoSided"),
+            "native_print.m must not reference NSPrintTwoSided"
+        );
+        assert!(
+            code.contains("PMSetDuplex"),
+            "duplex must still go through PMSetDuplex"
+        );
+        assert!(
+            code.contains("paperSize"),
+            "PrintSettings paper defaults must still set paperSize"
+        );
+        for token in [
+            "NSPrintPanelShowsCopies",
+            "NSPrintPanelShowsPageRange",
+            "NSPrintPanelShowsPaperSize",
+            "NSPrintPanelShowsOrientation",
+            "NSPrintPanelShowsScaling",
+            "NSPrintPanelShowsPreview",
+            "NSPrintPanelShowsPageSetupAccessory",
+            "NSPrintingPaginationModeAutomatic",
+            "scalingFactor",
+        ] {
+            assert!(
+                code.contains(token),
+                "native_print.m must keep {token} from the standard panel contract"
+            );
+        }
+        assert!(
+            !code.contains("NSPrintingPaginationModeClip"),
+            "interactive jobs must not force Clip pagination"
+        );
+    }
+
     #[test]
     fn native_settings_pass_paper_orientation_and_scaling_as_defaults() {
         let settings = PrintSettings::default()
