@@ -250,14 +250,16 @@ the chart into N Letter tiles at 100% (1px = 1pt) before the panel opens.
 1. **Fit / scale-to-fit** the imageable area (paper minus the 28pt join,
    intersected with `imageablePageBounds`) → **1 page**
 2. **Scale up** on the native panel → **N** row-major poster tiles
-   (left→right, then top→bottom). Each page is a contiguous crop
+   (left→right, then top→bottom). Each page is a contiguous crop.
+   Tiles that contain only white margin (no chart ink) are omitted
 3. **Scale down** → fewer tiles; **1 page** when the chart fits
 
 Tile look: no content overlap, 28pt join, ≤8pt registration ticks in the
-margin, “n of N” in the margin only (hidden when N = 1). The label is the
-post-scale page count — do not draw it in the PDF if you are sending a
-single full-chart page (the print view adds it). Do not add a Families
-poster-scale slider; Scale stays on `NSPrintPanel`.
+margin (only on edges that still adjoin a kept tile), “n of N” in the
+margin only (hidden when N = 1). The label is the post-filter page
+count — do not draw it in the PDF if you are sending a single full-chart
+page (the print view adds it). Do not add a Families poster-scale slider;
+Scale stays on `NSPrintPanel`.
 
 ```rust
 // Families / chart print: one page, full raster, FitToPage default.
@@ -282,7 +284,7 @@ perfect_print_backend_macos::print_pdf_bytes_with_dialog(
 ```
 
 Sit-with: with a 1-page full-chart PDF, Scale down → 1 page in Preview;
-Scale up → multi-page tiles.
+Scale up → multi-page tiles that contain chart ink (no blank sheets).
 
 ### Windows
 - Backend is a stub — PDF/raster output works

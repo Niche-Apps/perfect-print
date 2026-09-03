@@ -8,8 +8,10 @@
 //! `PerfectPrintPDFView` paginates from the live panel Scale: a source page
 //! that fits the imageable content area is 1 print page; scaling up produces
 //! row-major poster tiles; scaling down reduces the tile count (1 when it
-//! fits). Callers that want this (notably Families charts) should send a
-//! **single-page PDF of the full chart**, not a pre-tiled 100% poster.
+//! fits). Tiles that contain only page-fill white (no chart ink) are dropped
+//! so a tall×narrow tree does not emit blank side sheets. Callers that want
+//! this (notably Families charts) should send a **single-page PDF of the
+//! full chart**, not a pre-tiled 100% poster.
 //!
 //! Unattended jobs still use the CUPS CLI bridge:
 //! - `lpstat` for printer enumeration
@@ -119,6 +121,82 @@ unsafe extern "C" {
         out_src_h: *mut f64,
         out_dest_w: *mut f64,
         out_dest_h: *mut f64,
+    ) -> i32;
+
+    fn perfect_print_native_inspect_poster_kept_from_ink_rect(
+        media_w: f64,
+        media_h: f64,
+        paper_w: f64,
+        paper_h: f64,
+        imageable_x: f64,
+        imageable_y: f64,
+        imageable_w: f64,
+        imageable_h: f64,
+        scaling_mode: u8,
+        custom_scale: f64,
+        panel_scale: f64,
+        ink_x: f64,
+        ink_y: f64,
+        ink_w: f64,
+        ink_h: f64,
+        out_cols: *mut u32,
+        out_rows: *mut u32,
+        out_pages: *mut u32,
+        out_kept: *mut u32,
+        out_scale: *mut f64,
+    ) -> i32;
+
+    fn perfect_print_native_inspect_poster_kept_tile(
+        kept_index: u32,
+        media_w: f64,
+        media_h: f64,
+        paper_w: f64,
+        paper_h: f64,
+        imageable_x: f64,
+        imageable_y: f64,
+        imageable_w: f64,
+        imageable_h: f64,
+        scaling_mode: u8,
+        custom_scale: f64,
+        panel_scale: f64,
+        ink_x: f64,
+        ink_y: f64,
+        ink_w: f64,
+        ink_h: f64,
+        out_col: *mut u32,
+        out_row: *mut u32,
+        out_print_index: *mut u32,
+        out_grid_index: *mut u32,
+        out_join_right: *mut i32,
+        out_join_bottom: *mut i32,
+        out_src_x: *mut f64,
+        out_src_y: *mut f64,
+        out_src_w: *mut f64,
+        out_src_h: *mut f64,
+    ) -> i32;
+
+    fn perfect_print_native_inspect_poster_kept_from_bitmap(
+        media_w: f64,
+        media_h: f64,
+        paper_w: f64,
+        paper_h: f64,
+        imageable_x: f64,
+        imageable_y: f64,
+        imageable_w: f64,
+        imageable_h: f64,
+        scaling_mode: u8,
+        custom_scale: f64,
+        panel_scale: f64,
+        pixels: *const u8,
+        pix_w: u32,
+        pix_h: u32,
+        stride: u32,
+        channels: u32,
+        out_cols: *mut u32,
+        out_rows: *mut u32,
+        out_pages: *mut u32,
+        out_kept: *mut u32,
+        out_scale: *mut f64,
     ) -> i32;
 }
 
@@ -248,6 +326,192 @@ pub fn inspect_poster_tile(
         dest_w,
         dest_h,
     })
+}
+
+/// Geometric grid plus the post-filter kept-tile count for an ink rect.
+///
+/// `ink` is a top-down media-space rectangle of real chart content. Tiles
+/// that do not intersect it are dropped (blank side sheets). `kept` is
+/// never zero.
+pub fn inspect_poster_kept_from_ink_rect(
+    media_w: f64,
+    media_h: f64,
+    paper_w: f64,
+    paper_h: f64,
+    imageable: (f64, f64, f64, f64),
+    scaling_mode: u8,
+    custom_scale: f64,
+    panel_scale: f64,
+    ink: (f64, f64, f64, f64),
+) -> (u32, u32, u32, u32, f64) {
+    let mut cols = 0u32;
+    let mut rows = 0u32;
+    let mut pages = 0u32;
+    let mut kept = 0u32;
+    let mut scale = 0.0f64;
+    let rc = unsafe {
+        perfect_print_native_inspect_poster_kept_from_ink_rect(
+            media_w,
+            media_h,
+            paper_w,
+            paper_h,
+            imageable.0,
+            imageable.1,
+            imageable.2,
+            imageable.3,
+            scaling_mode,
+            custom_scale,
+            panel_scale,
+            ink.0,
+            ink.1,
+            ink.2,
+            ink.3,
+            &mut cols,
+            &mut rows,
+            &mut pages,
+            &mut kept,
+            &mut scale,
+        )
+    };
+    assert_eq!(rc, 1, "poster kept-grid inspect should always succeed");
+    (cols, rows, pages, kept, scale)
+}
+
+/// One kept poster tile after blank-page suppression.
+#[derive(Debug, Clone, PartialEq)]
+pub struct KeptPosterTile {
+    pub col: u32,
+    pub row: u32,
+    pub print_index: u32,
+    pub grid_index: u32,
+    pub join_right: bool,
+    pub join_bottom: bool,
+    pub src_x: f64,
+    pub src_y: f64,
+    pub src_w: f64,
+    pub src_h: f64,
+}
+
+/// Inspect one kept tile (0-based print index) for an ink-rect occupancy.
+pub fn inspect_poster_kept_tile(
+    kept_index: u32,
+    media_w: f64,
+    media_h: f64,
+    paper_w: f64,
+    paper_h: f64,
+    imageable: (f64, f64, f64, f64),
+    scaling_mode: u8,
+    custom_scale: f64,
+    panel_scale: f64,
+    ink: (f64, f64, f64, f64),
+) -> Option<KeptPosterTile> {
+    let mut col = 0u32;
+    let mut row = 0u32;
+    let mut print_index = 0u32;
+    let mut grid_index = 0u32;
+    let mut join_right = 0i32;
+    let mut join_bottom = 0i32;
+    let mut src_x = 0.0;
+    let mut src_y = 0.0;
+    let mut src_w = 0.0;
+    let mut src_h = 0.0;
+    let rc = unsafe {
+        perfect_print_native_inspect_poster_kept_tile(
+            kept_index,
+            media_w,
+            media_h,
+            paper_w,
+            paper_h,
+            imageable.0,
+            imageable.1,
+            imageable.2,
+            imageable.3,
+            scaling_mode,
+            custom_scale,
+            panel_scale,
+            ink.0,
+            ink.1,
+            ink.2,
+            ink.3,
+            &mut col,
+            &mut row,
+            &mut print_index,
+            &mut grid_index,
+            &mut join_right,
+            &mut join_bottom,
+            &mut src_x,
+            &mut src_y,
+            &mut src_w,
+            &mut src_h,
+        )
+    };
+    if rc != 1 {
+        return None;
+    }
+    Some(KeptPosterTile {
+        col,
+        row,
+        print_index,
+        grid_index,
+        join_right: join_right != 0,
+        join_bottom: join_bottom != 0,
+        src_x,
+        src_y,
+        src_w,
+        src_h,
+    })
+}
+
+/// Geometric grid plus post-filter kept count from a packed occupancy bitmap.
+///
+/// `pixels` is top-down RGB (3) or RGBA (4). Row 0 is the top of the media.
+pub fn inspect_poster_kept_from_bitmap(
+    media_w: f64,
+    media_h: f64,
+    paper_w: f64,
+    paper_h: f64,
+    imageable: (f64, f64, f64, f64),
+    scaling_mode: u8,
+    custom_scale: f64,
+    panel_scale: f64,
+    pixels: &[u8],
+    pix_w: u32,
+    pix_h: u32,
+    stride: u32,
+    channels: u32,
+) -> (u32, u32, u32, u32, f64) {
+    let mut cols = 0u32;
+    let mut rows = 0u32;
+    let mut pages = 0u32;
+    let mut kept = 0u32;
+    let mut scale = 0.0f64;
+    let rc = unsafe {
+        perfect_print_native_inspect_poster_kept_from_bitmap(
+            media_w,
+            media_h,
+            paper_w,
+            paper_h,
+            imageable.0,
+            imageable.1,
+            imageable.2,
+            imageable.3,
+            scaling_mode,
+            custom_scale,
+            panel_scale,
+            pixels.as_ptr(),
+            pix_w,
+            pix_h,
+            stride,
+            channels,
+            &mut cols,
+            &mut rows,
+            &mut pages,
+            &mut kept,
+            &mut scale,
+        )
+    };
+    assert_eq!(rc, 1, "poster bitmap kept-grid inspect should always succeed");
+    (cols, rows, pages, kept, scale)
 }
 
 /// Show the native macOS print panel for an in-memory PDF.
@@ -798,9 +1062,11 @@ mod tests {
             "PerfectPrintComputePosterGrid",
             "PerfectPrintPosterContentBounds",
             "currentPrintPageCount",
-            "PerfectPrintPosterTileAt",
+            "PerfectPrintFilterPosterTiles",
             "PERFECT_PRINT_TICK_LENGTH_PT",
-            "drawPosterChromeForTile",
+            "drawPosterChromeForKept",
+            "join_right",
+            "join_bottom",
         ] {
             assert!(
                 code.contains(token),
@@ -987,17 +1253,275 @@ mod tests {
     fn chrome_contract_hides_label_when_one_page() {
         let src = include_str!("native_print.m");
         assert!(
-            src.contains("grid.pages <= 1 || totalPages <= 1"),
-            "chrome must hide when N=1"
+            src.contains("keptCount <= 1 || totalPages <= 1"),
+            "chrome must hide when post-filter N=1"
         );
         assert!(
             src.contains("%ld of %lu") || src.contains(" of "),
-            "chrome must draw post-scale n of N when N>1"
+            "chrome must draw post-filter n of N when N>1"
         );
         assert!(
             src.contains("PERFECT_PRINT_TICK_LENGTH_PT"),
             "registration ticks live in the join margin"
         );
+        assert!(
+            src.contains("join_right") && src.contains("join_bottom"),
+            "ticks only on edges that still adjoin a kept tile"
+        );
+    }
+
+    /// Square media with a tall×narrow ink column — typical pedigree /
+    /// descendants chart on a padded canvas. Scale-up from Fit builds a
+    /// 3×3 rectangle; side columns are page-fill only and must be dropped.
+    fn tall_narrow_scale_up_case() -> (f64, f64, (f64, f64, f64, f64), f64) {
+        let media = 2000.0;
+        let ink_w = 220.0;
+        let ink = ((media - ink_w) * 0.5, 40.0, ink_w, media - 80.0);
+        (media, media, ink, 3.0)
+    }
+
+    #[test]
+    fn scale_up_tall_narrow_content_drops_blank_side_tiles() {
+        let (media_w, media_h, ink, panel_scale) = tall_narrow_scale_up_case();
+        let (cols, rows, pages, kept, _) = inspect_poster_kept_from_ink_rect(
+            media_w,
+            media_h,
+            792.0,
+            612.0,
+            landscape_letter_imageable(),
+            SCALING_FIT_TO_PAGE,
+            1.0,
+            panel_scale,
+            ink,
+        );
+        assert_eq!(
+            (cols, rows, pages),
+            (3, 3, 9),
+            "geometric Scale-up grid is a full rectangle"
+        );
+        assert_eq!(kept, 3, "only the ink column is printed");
+        assert!(pages > kept, "blank side tiles must be suppressed");
+
+        let tiles: Vec<KeptPosterTile> = (0..kept)
+            .map(|i| {
+                inspect_poster_kept_tile(
+                    i,
+                    media_w,
+                    media_h,
+                    792.0,
+                    612.0,
+                    landscape_letter_imageable(),
+                    SCALING_FIT_TO_PAGE,
+                    1.0,
+                    panel_scale,
+                    ink,
+                )
+                .unwrap_or_else(|| panic!("kept tile {i}"))
+            })
+            .collect();
+        assert_eq!(
+            tiles
+                .iter()
+                .map(|t| (t.col, t.row, t.print_index))
+                .collect::<Vec<_>>(),
+            vec![(1, 0, 0), (1, 1, 1), (1, 2, 2)],
+            "kept tiles stay row-major L→R then T→B"
+        );
+        assert!(
+            inspect_poster_kept_tile(
+                kept,
+                media_w,
+                media_h,
+                792.0,
+                612.0,
+                landscape_letter_imageable(),
+                SCALING_FIT_TO_PAGE,
+                1.0,
+                panel_scale,
+                ink,
+            )
+            .is_none(),
+            "print index is bounded by the post-filter count"
+        );
+
+        assert!(!tiles[0].join_right && tiles[0].join_bottom);
+        assert!(!tiles[1].join_right && tiles[1].join_bottom);
+        assert!(!tiles[2].join_right && !tiles[2].join_bottom);
+    }
+
+    #[test]
+    fn scale_up_tall_narrow_labels_match_kept_count() {
+        let (media_w, media_h, ink, panel_scale) = tall_narrow_scale_up_case();
+        let (_, _, pages, kept, _) = inspect_poster_kept_from_ink_rect(
+            media_w,
+            media_h,
+            792.0,
+            612.0,
+            landscape_letter_imageable(),
+            SCALING_FIT_TO_PAGE,
+            1.0,
+            panel_scale,
+            ink,
+        );
+        assert_eq!(kept, 3);
+        assert_eq!(pages, 9);
+        for i in 0..kept {
+            let tile = inspect_poster_kept_tile(
+                i,
+                media_w,
+                media_h,
+                792.0,
+                612.0,
+                landscape_letter_imageable(),
+                SCALING_FIT_TO_PAGE,
+                1.0,
+                panel_scale,
+                ink,
+            )
+            .expect("kept tile");
+            assert_eq!(
+                tile.print_index, i,
+                "n of N uses the post-filter index (1-based n = print_index+1 of {kept})"
+            );
+        }
+        let src = include_str!("native_print.m");
+        assert!(
+            src.contains("keptGrid.kept") || src.contains("kept.kept"),
+            "Preview page count must be the post-filter N"
+        );
+    }
+
+    #[test]
+    fn all_empty_occupancy_keeps_one_page() {
+        let (_, _, pages, kept, _) = inspect_poster_kept_from_ink_rect(
+            2000.0,
+            2000.0,
+            792.0,
+            612.0,
+            landscape_letter_imageable(),
+            SCALING_FIT_TO_PAGE,
+            1.0,
+            3.0,
+            (0.0, 0.0, 0.0, 0.0),
+        );
+        assert!(pages > 1, "geometric grid still has many tiles");
+        assert_eq!(kept, 1, "never emit zero pages");
+        let tile = inspect_poster_kept_tile(
+            0,
+            2000.0,
+            2000.0,
+            792.0,
+            612.0,
+            landscape_letter_imageable(),
+            SCALING_FIT_TO_PAGE,
+            1.0,
+            3.0,
+            (0.0, 0.0, 0.0, 0.0),
+        )
+        .expect("fallback tile");
+        assert_eq!((tile.col, tile.row, tile.print_index), (0, 0, 0));
+    }
+
+    #[test]
+    fn full_ink_rect_keeps_every_geometric_tile() {
+        let (cols, rows, pages, kept, _) = inspect_poster_kept_from_ink_rect(
+            80.0,
+            60.0,
+            80.0,
+            60.0,
+            (0.0, 0.0, 80.0, 60.0),
+            SCALING_NONE,
+            1.0,
+            1.0,
+            (0.0, 0.0, 80.0, 60.0),
+        );
+        // Paper 80×60 minus 28pt join on each side is too small, so content
+        // bounds fall back to the imageable 80×60. 80×60 at 100% is 1 page.
+        assert_eq!((cols, rows, pages, kept), (1, 1, 1, 1));
+
+        let (cols, rows, pages, kept, _) = inspect_poster_kept_from_ink_rect(
+            1472.0,
+            1112.0,
+            792.0,
+            612.0,
+            landscape_letter_imageable(),
+            SCALING_FIT_TO_PAGE,
+            1.0,
+            2.0,
+            (0.0, 0.0, 1472.0, 1112.0),
+        );
+        assert_eq!((cols, rows, pages), (2, 2, 4));
+        assert_eq!(kept, 4, "content that fills the media keeps every tile");
+    }
+
+    #[test]
+    fn bitmap_sample_drops_white_side_tiles_but_keeps_a_name() {
+        // Media 800×400, two 400pt-wide columns at 100% on a paper whose
+        // content rect is 400×400 (custom imageable, no 28pt collapse).
+        let media_w = 800.0;
+        let media_h = 400.0;
+        let pix_w = 40u32;
+        let pix_h = 20u32;
+        let mut pixels = vec![255u8; (pix_w * pix_h * 4) as usize];
+        // Name in the right-hand column (bitmap x 36..39 → media x 720..800).
+        for y in 8..11 {
+            for x in 36..40 {
+                let i = ((y * pix_w + x) * 4) as usize;
+                pixels[i] = 0x11;
+                pixels[i + 1] = 0x11;
+                pixels[i + 2] = 0x11;
+            }
+        }
+        let (cols, rows, pages, kept, _) = inspect_poster_kept_from_bitmap(
+            media_w,
+            media_h,
+            456.0,
+            456.0,
+            (28.0, 28.0, 400.0, 400.0),
+            SCALING_NONE,
+            1.0,
+            1.0,
+            &pixels,
+            pix_w,
+            pix_h,
+            pix_w * 4,
+            4,
+        );
+        assert_eq!((cols, rows, pages), (2, 1, 2));
+        assert_eq!(kept, 1, "left column is white; right column keeps the name");
+    }
+
+    #[test]
+    fn all_white_bitmap_keeps_one_page() {
+        let pix_w = 16u32;
+        let pix_h = 16u32;
+        let pixels = vec![255u8; (pix_w * pix_h * 4) as usize];
+        let (_, _, pages, kept, _) = inspect_poster_kept_from_bitmap(
+            2000.0,
+            2000.0,
+            792.0,
+            612.0,
+            landscape_letter_imageable(),
+            SCALING_FIT_TO_PAGE,
+            1.0,
+            3.0,
+            &pixels,
+            pix_w,
+            pix_h,
+            pix_w * 4,
+            4,
+        );
+        assert!(pages > 1);
+        assert_eq!(kept, 1);
+    }
+
+    #[test]
+    fn poster_tiles_header_defines_families_fill_and_ink_threshold() {
+        let src = include_str!("poster_tiles.h");
+        assert!(src.contains("PERFECT_PRINT_PAGE_FILL_R"));
+        assert!(src.contains("PERFECT_PRINT_TILE_INK_MIN_SAMPLES"));
+        assert!(src.contains("255"), "page fill is #fff");
+        assert!(src.contains("0x11"), "Families ink is #111");
     }
 
     #[test]

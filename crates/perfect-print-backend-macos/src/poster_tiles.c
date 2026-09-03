@@ -1,6 +1,7 @@
 #include "poster_tiles.h"
 
 #include <stddef.h>
+#include <string.h>
 
 static double pp_min(double a, double b) { return a < b ? a : b; }
 static double pp_max(double a, double b) { return a > b ? a : b; }
@@ -280,5 +281,456 @@ int32_t perfect_print_native_inspect_poster_tile(
     if (out_src_h) *out_src_h = tile.src_h;
     if (out_dest_w) *out_dest_w = tile.dest_w;
     if (out_dest_h) *out_dest_h = tile.dest_h;
+    return 1;
+}
+
+int32_t PerfectPrintPixelIsInk(uint8_t r, uint8_t g, uint8_t b) {
+    const int slack = PERFECT_PRINT_PAGE_FILL_SLACK;
+    const int floor_v = 255 - slack;
+    return r < floor_v || g < floor_v || b < floor_v;
+}
+
+static int pp_floor_nonneg(double v) {
+    if (v <= 0.0) {
+        return 0;
+    }
+    return (int)v;
+}
+
+static int pp_ceil_nonneg(double v) {
+    if (v <= 0.0) {
+        return 0;
+    }
+    int i = (int)v;
+    if ((double)i < v) {
+        i += 1;
+    }
+    return i;
+}
+
+uint32_t PerfectPrintCountInkPixels(
+    const uint8_t *pixels,
+    uint32_t pix_w,
+    uint32_t pix_h,
+    uint32_t stride,
+    uint32_t channels,
+    double media_w,
+    double media_h,
+    double src_x,
+    double src_y,
+    double src_w,
+    double src_h
+) {
+    if (!pixels || pix_w == 0 || pix_h == 0) {
+        return 0;
+    }
+    if (channels != 3 && channels != 4) {
+        return 0;
+    }
+    if (stride < pix_w * channels) {
+        return 0;
+    }
+    if (!pp_finite_positive(media_w) || !pp_finite_positive(media_h)) {
+        return 0;
+    }
+    if (!(src_w > 0.0) || !(src_h > 0.0)) {
+        return 0;
+    }
+
+    int x0 = pp_floor_nonneg(src_x / media_w * (double)pix_w);
+    int x1 = pp_ceil_nonneg((src_x + src_w) / media_w * (double)pix_w);
+    int y0 = pp_floor_nonneg(src_y / media_h * (double)pix_h);
+    int y1 = pp_ceil_nonneg((src_y + src_h) / media_h * (double)pix_h);
+    if (x0 < 0) x0 = 0;
+    if (y0 < 0) y0 = 0;
+    if (x1 > (int)pix_w) x1 = (int)pix_w;
+    if (y1 > (int)pix_h) y1 = (int)pix_h;
+    if (x1 <= x0 || y1 <= y0) {
+        return 0;
+    }
+
+    uint32_t ink = 0;
+    for (int y = y0; y < y1; y++) {
+        const uint8_t *row = pixels + (size_t)y * (size_t)stride;
+        for (int x = x0; x < x1; x++) {
+            const uint8_t *p = row + (size_t)x * (size_t)channels;
+            if (PerfectPrintPixelIsInk(p[0], p[1], p[2])) {
+                ink += 1;
+            }
+        }
+    }
+    return ink;
+}
+
+int32_t PerfectPrintPosterRegionHasInk(
+    const uint8_t *pixels,
+    uint32_t pix_w,
+    uint32_t pix_h,
+    uint32_t stride,
+    uint32_t channels,
+    double media_w,
+    double media_h,
+    double src_x,
+    double src_y,
+    double src_w,
+    double src_h
+) {
+    uint32_t ink = PerfectPrintCountInkPixels(
+        pixels, pix_w, pix_h, stride, channels,
+        media_w, media_h, src_x, src_y, src_w, src_h);
+    if (ink == 0) {
+        return 0;
+    }
+
+    int x0 = pp_floor_nonneg(src_x / media_w * (double)pix_w);
+    int x1 = pp_ceil_nonneg((src_x + src_w) / media_w * (double)pix_w);
+    int y0 = pp_floor_nonneg(src_y / media_h * (double)pix_h);
+    int y1 = pp_ceil_nonneg((src_y + src_h) / media_h * (double)pix_h);
+    if (x0 < 0) x0 = 0;
+    if (y0 < 0) y0 = 0;
+    if (x1 > (int)pix_w) x1 = (int)pix_w;
+    if (y1 > (int)pix_h) y1 = (int)pix_h;
+    int samples = (x1 > x0 && y1 > y0) ? (x1 - x0) * (y1 - y0) : 0;
+    uint32_t need = PERFECT_PRINT_TILE_INK_MIN_SAMPLES;
+    if (samples > 0 && need > (uint32_t)samples) {
+        need = 1;
+    }
+    return ink >= need;
+}
+
+static int pp_rects_intersect(
+    double ax, double ay, double aw, double ah,
+    double bx, double by, double bw, double bh
+) {
+    if (!(aw > 0.0) || !(ah > 0.0) || !(bw > 0.0) || !(bh > 0.0)) {
+        return 0;
+    }
+    return ax < bx + bw && bx < ax + aw && ay < by + bh && by < ay + ah;
+}
+
+static void pp_build_kept(
+    double media_w,
+    double media_h,
+    double scale,
+    double tile_w,
+    double tile_h,
+    uint8_t *keep,
+    PerfectPrintPosterKeptGrid *out
+) {
+    memset(out, 0, sizeof(*out));
+    if (!pp_finite_positive(scale)) {
+        scale = 1.0;
+    }
+    if (!pp_finite_positive(media_w)) media_w = 1.0;
+    if (!pp_finite_positive(media_h)) media_h = 1.0;
+    if (!pp_finite_positive(tile_w)) tile_w = 1.0;
+    if (!pp_finite_positive(tile_h)) tile_h = 1.0;
+
+    PerfectPrintPosterGrid grid = PerfectPrintPosterGridFromScaled(
+        media_w * scale, media_h * scale, tile_w, tile_h);
+    out->cols = grid.cols;
+    out->rows = grid.rows;
+    out->pages = grid.pages;
+
+    uint32_t nkeep = 0;
+    for (uint32_t i = 0; i < grid.pages; i++) {
+        if (keep[i]) {
+            nkeep += 1;
+        }
+    }
+    if (nkeep == 0 && grid.pages > 0) {
+        keep[0] = 1;
+    }
+
+    uint32_t out_i = 0;
+    for (uint32_t i = 0; i < grid.pages && out_i < PERFECT_PRINT_MAX_TILES; i++) {
+        if (!keep[i]) {
+            continue;
+        }
+        PerfectPrintPosterTile tile;
+        if (!PerfectPrintPosterTileAt(i, media_w, media_h, scale, tile_w, tile_h, &tile)) {
+            continue;
+        }
+        out->tiles[out_i].col = tile.col;
+        out->tiles[out_i].row = tile.row;
+        out->tiles[out_i].grid_index = i;
+        out->tiles[out_i].print_index = out_i;
+        out->tiles[out_i].join_right = 0;
+        out->tiles[out_i].join_bottom = 0;
+        out->tiles[out_i].tile = tile;
+        out_i += 1;
+    }
+    out->kept = out_i > 0 ? out_i : 1;
+
+    uint8_t occupied[PERFECT_PRINT_MAX_TILE_AXIS][PERFECT_PRINT_MAX_TILE_AXIS];
+    memset(occupied, 0, sizeof(occupied));
+    for (uint32_t i = 0; i < out->kept; i++) {
+        uint32_t c = out->tiles[i].col;
+        uint32_t r = out->tiles[i].row;
+        if (c < PERFECT_PRINT_MAX_TILE_AXIS && r < PERFECT_PRINT_MAX_TILE_AXIS) {
+            occupied[r][c] = 1;
+        }
+    }
+    for (uint32_t i = 0; i < out->kept; i++) {
+        uint32_t c = out->tiles[i].col;
+        uint32_t r = out->tiles[i].row;
+        out->tiles[i].join_right =
+            (c + 1 < grid.cols && c + 1 < PERFECT_PRINT_MAX_TILE_AXIS && occupied[r][c + 1])
+                ? 1
+                : 0;
+        out->tiles[i].join_bottom =
+            (r + 1 < grid.rows && r + 1 < PERFECT_PRINT_MAX_TILE_AXIS && occupied[r + 1][c])
+                ? 1
+                : 0;
+    }
+}
+
+void PerfectPrintFilterPosterTiles(
+    double media_w,
+    double media_h,
+    double scale,
+    double tile_w,
+    double tile_h,
+    const uint8_t *pixels,
+    uint32_t pix_w,
+    uint32_t pix_h,
+    uint32_t stride,
+    uint32_t channels,
+    PerfectPrintPosterKeptGrid *out
+) {
+    if (!out) {
+        return;
+    }
+    if (!pp_finite_positive(scale)) {
+        scale = 1.0;
+    }
+    PerfectPrintPosterGrid grid = PerfectPrintComputePosterGrid(
+        media_w, media_h, scale, tile_w, tile_h);
+    uint8_t keep[PERFECT_PRINT_MAX_TILES];
+    memset(keep, 0, sizeof(keep));
+
+    if (!pixels) {
+        for (uint32_t i = 0; i < grid.pages && i < PERFECT_PRINT_MAX_TILES; i++) {
+            keep[i] = 1;
+        }
+        pp_build_kept(media_w, media_h, scale, tile_w, tile_h, keep, out);
+        return;
+    }
+
+    for (uint32_t i = 0; i < grid.pages && i < PERFECT_PRINT_MAX_TILES; i++) {
+        PerfectPrintPosterTile tile;
+        if (!PerfectPrintPosterTileAt(i, media_w, media_h, scale, tile_w, tile_h, &tile)) {
+            continue;
+        }
+        keep[i] = PerfectPrintPosterRegionHasInk(
+                      pixels, pix_w, pix_h, stride, channels,
+                      media_w, media_h,
+                      tile.src_x, tile.src_y, tile.src_w, tile.src_h)
+                      ? 1
+                      : 0;
+    }
+    pp_build_kept(media_w, media_h, scale, tile_w, tile_h, keep, out);
+}
+
+void PerfectPrintFilterPosterTilesFromInkRect(
+    double media_w,
+    double media_h,
+    double scale,
+    double tile_w,
+    double tile_h,
+    double ink_x,
+    double ink_y,
+    double ink_w,
+    double ink_h,
+    PerfectPrintPosterKeptGrid *out
+) {
+    if (!out) {
+        return;
+    }
+    if (!pp_finite_positive(scale)) {
+        scale = 1.0;
+    }
+    PerfectPrintPosterGrid grid = PerfectPrintComputePosterGrid(
+        media_w, media_h, scale, tile_w, tile_h);
+    uint8_t keep[PERFECT_PRINT_MAX_TILES];
+    memset(keep, 0, sizeof(keep));
+    for (uint32_t i = 0; i < grid.pages && i < PERFECT_PRINT_MAX_TILES; i++) {
+        PerfectPrintPosterTile tile;
+        if (!PerfectPrintPosterTileAt(i, media_w, media_h, scale, tile_w, tile_h, &tile)) {
+            continue;
+        }
+        keep[i] = pp_rects_intersect(
+                      tile.src_x, tile.src_y, tile.src_w, tile.src_h,
+                      ink_x, ink_y, ink_w, ink_h)
+                      ? 1
+                      : 0;
+    }
+    pp_build_kept(media_w, media_h, scale, tile_w, tile_h, keep, out);
+}
+
+static void pp_inspect_scale_and_tile(
+    double media_w,
+    double media_h,
+    double paper_w,
+    double paper_h,
+    double imageable_x,
+    double imageable_y,
+    double imageable_w,
+    double imageable_h,
+    uint8_t scaling_mode,
+    double custom_scale,
+    double panel_scale,
+    double *out_scale,
+    double *out_tile_w,
+    double *out_tile_h
+) {
+    double tile_x = 0.0, tile_y = 0.0, tile_w = 0.0, tile_h = 0.0;
+    PerfectPrintPosterContentBounds(
+        paper_w, paper_h,
+        imageable_x, imageable_y, imageable_w, imageable_h,
+        &tile_x, &tile_y, &tile_w, &tile_h);
+    (void)tile_x;
+    (void)tile_y;
+    double scale = PerfectPrintPosterScale(
+        scaling_mode, custom_scale, panel_scale,
+        media_w, media_h, tile_w, tile_h);
+    if (out_scale) *out_scale = scale;
+    if (out_tile_w) *out_tile_w = tile_w;
+    if (out_tile_h) *out_tile_h = tile_h;
+}
+
+int32_t perfect_print_native_inspect_poster_kept_from_ink_rect(
+    double media_w,
+    double media_h,
+    double paper_w,
+    double paper_h,
+    double imageable_x,
+    double imageable_y,
+    double imageable_w,
+    double imageable_h,
+    uint8_t scaling_mode,
+    double custom_scale,
+    double panel_scale,
+    double ink_x,
+    double ink_y,
+    double ink_w,
+    double ink_h,
+    uint32_t *out_cols,
+    uint32_t *out_rows,
+    uint32_t *out_pages,
+    uint32_t *out_kept,
+    double *out_scale
+) {
+    double scale = 1.0, tile_w = 1.0, tile_h = 1.0;
+    pp_inspect_scale_and_tile(
+        media_w, media_h, paper_w, paper_h,
+        imageable_x, imageable_y, imageable_w, imageable_h,
+        scaling_mode, custom_scale, panel_scale,
+        &scale, &tile_w, &tile_h);
+    PerfectPrintPosterKeptGrid kept;
+    PerfectPrintFilterPosterTilesFromInkRect(
+        media_w, media_h, scale, tile_w, tile_h,
+        ink_x, ink_y, ink_w, ink_h, &kept);
+    if (out_cols) *out_cols = kept.cols;
+    if (out_rows) *out_rows = kept.rows;
+    if (out_pages) *out_pages = kept.pages;
+    if (out_kept) *out_kept = kept.kept;
+    if (out_scale) *out_scale = scale;
+    return 1;
+}
+
+int32_t perfect_print_native_inspect_poster_kept_tile(
+    uint32_t kept_index,
+    double media_w,
+    double media_h,
+    double paper_w,
+    double paper_h,
+    double imageable_x,
+    double imageable_y,
+    double imageable_w,
+    double imageable_h,
+    uint8_t scaling_mode,
+    double custom_scale,
+    double panel_scale,
+    double ink_x,
+    double ink_y,
+    double ink_w,
+    double ink_h,
+    uint32_t *out_col,
+    uint32_t *out_row,
+    uint32_t *out_print_index,
+    uint32_t *out_grid_index,
+    int32_t *out_join_right,
+    int32_t *out_join_bottom,
+    double *out_src_x,
+    double *out_src_y,
+    double *out_src_w,
+    double *out_src_h
+) {
+    double scale = 1.0, tile_w = 1.0, tile_h = 1.0;
+    pp_inspect_scale_and_tile(
+        media_w, media_h, paper_w, paper_h,
+        imageable_x, imageable_y, imageable_w, imageable_h,
+        scaling_mode, custom_scale, panel_scale,
+        &scale, &tile_w, &tile_h);
+    PerfectPrintPosterKeptGrid kept;
+    PerfectPrintFilterPosterTilesFromInkRect(
+        media_w, media_h, scale, tile_w, tile_h,
+        ink_x, ink_y, ink_w, ink_h, &kept);
+    if (kept_index >= kept.kept) {
+        return 0;
+    }
+    const PerfectPrintPosterKeptTile *t = &kept.tiles[kept_index];
+    if (out_col) *out_col = t->col;
+    if (out_row) *out_row = t->row;
+    if (out_print_index) *out_print_index = t->print_index;
+    if (out_grid_index) *out_grid_index = t->grid_index;
+    if (out_join_right) *out_join_right = t->join_right;
+    if (out_join_bottom) *out_join_bottom = t->join_bottom;
+    if (out_src_x) *out_src_x = t->tile.src_x;
+    if (out_src_y) *out_src_y = t->tile.src_y;
+    if (out_src_w) *out_src_w = t->tile.src_w;
+    if (out_src_h) *out_src_h = t->tile.src_h;
+    return 1;
+}
+
+int32_t perfect_print_native_inspect_poster_kept_from_bitmap(
+    double media_w,
+    double media_h,
+    double paper_w,
+    double paper_h,
+    double imageable_x,
+    double imageable_y,
+    double imageable_w,
+    double imageable_h,
+    uint8_t scaling_mode,
+    double custom_scale,
+    double panel_scale,
+    const uint8_t *pixels,
+    uint32_t pix_w,
+    uint32_t pix_h,
+    uint32_t stride,
+    uint32_t channels,
+    uint32_t *out_cols,
+    uint32_t *out_rows,
+    uint32_t *out_pages,
+    uint32_t *out_kept,
+    double *out_scale
+) {
+    double scale = 1.0, tile_w = 1.0, tile_h = 1.0;
+    pp_inspect_scale_and_tile(
+        media_w, media_h, paper_w, paper_h,
+        imageable_x, imageable_y, imageable_w, imageable_h,
+        scaling_mode, custom_scale, panel_scale,
+        &scale, &tile_w, &tile_h);
+    PerfectPrintPosterKeptGrid kept;
+    PerfectPrintFilterPosterTiles(
+        media_w, media_h, scale, tile_w, tile_h,
+        pixels, pix_w, pix_h, stride, channels, &kept);
+    if (out_cols) *out_cols = kept.cols;
+    if (out_rows) *out_rows = kept.rows;
+    if (out_pages) *out_pages = kept.pages;
+    if (out_kept) *out_kept = kept.kept;
+    if (out_scale) *out_scale = scale;
     return 1;
 }
