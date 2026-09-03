@@ -222,8 +222,9 @@ static int32_t perfect_print_run_pdf_dialog(
         info.orientation = settings.landscape ? NSPaperOrientationLandscape : NSPaperOrientationPortrait;
         info.horizontallyCentered = YES;
         info.verticallyCentered = YES;
-        info.horizontalPagination = NSPrintingPaginationModeClip;
-        info.verticalPagination = NSPrintingPaginationModeClip;
+        // Fit (not Clip) so the panel's Scale control can resize the job.
+        info.horizontalPagination = NSPrintingPaginationModeFit;
+        info.verticalPagination = NSPrintingPaginationModeFit;
         info.dictionary[NSPrintCopies] = @(MAX(settings.copies, 1));
         info.dictionary[NSPrintMustCollate] = @(settings.collate);
 
@@ -250,6 +251,17 @@ static int32_t perfect_print_run_pdf_dialog(
         }
         operation.showsPrintPanel = YES;
         operation.showsProgressPanel = YES;
+        // Default NSPrintPanel options omit paper size, orientation, scale,
+        // preview, and page setup (two-sided lives on the accessory). Set the
+        // full useful mask; do not add a Color vs B&W control.
+        operation.printPanel.options =
+            NSPrintPanelShowsCopies |
+            NSPrintPanelShowsPageRange |
+            NSPrintPanelShowsPaperSize |
+            NSPrintPanelShowsOrientation |
+            NSPrintPanelShowsScaling |
+            NSPrintPanelShowsPreview |
+            NSPrintPanelShowsPageSetupAccessory;
         BOOL accepted = [operation runOperation];
         return accepted ? 1 : 0;
     }
