@@ -234,10 +234,55 @@ cargo run -p perfect-print-cli -- diagnostics hello --out hello-diag.zip
 ### macOS
 - Interactive printing uses a standard `NSPrintPanel` (`NSPrintOperation` + PDFKit)
   with Copies, Pages, Paper Size, Orientation, Scale, Preview, Page Setup, and the PDF menu
+- There is no in-app sheet. Scale lives on the native panel only
 - `PrintSettings` paper / orientation / scaling / duplex are initial defaults; the user can change them in the sheet
 - Canonical models render once to in-memory PDF bytes before the panel opens
 - Unattended submission, job tracking, and cancellation remain available through
   the `lpstat`/`lp`/`cancel` bridge
+
+#### Single full-chart page (Families and other posters)
+
+Send **one PDF page** that contains the entire chart image. Do not pre-split
+the chart into N Letter tiles at 100% (1px = 1pt) before the panel opens.
+
+`PerfectPrintPDFView` then owns pagination:
+
+1. **Fit / scale-to-fit** the imageable area (paper minus the 28pt join,
+   intersected with `imageablePageBounds`) → **1 page**
+2. **Scale up** on the native panel → **N** row-major poster tiles
+   (left→right, then top→bottom). Each page is a contiguous crop
+3. **Scale down** → fewer tiles; **1 page** when the chart fits
+
+Tile look: no content overlap, 28pt join, ≤8pt registration ticks in the
+margin, “n of N” in the margin only (hidden when N = 1). The label is the
+post-scale page count — do not draw it in the PDF if you are sending a
+single full-chart page (the print view adds it). Do not add a Families
+poster-scale slider; Scale stays on `NSPrintPanel`.
+
+```rust
+// Families / chart print: one page, full raster, FitToPage default.
+// The user raises or lowers Scale in the system panel; page count follows.
+let model = Document::new()
+    .title("Pedigree")
+    .page(page_size)          // Letter or landscape Letter
+    .margin(28.0)             // join strip; do not pre-tile
+    .add_image("chart", width, height, pixels)
+    .add(Image::new("chart").size(width as f64, height as f64)) // 1px = 1pt
+    .build()?;
+
+let settings = PrintSettings::default()
+    .paper_size(page_size)
+    .scaling(PrintScaling::FitToPage);
+
+perfect_print_backend_macos::print_pdf_bytes_with_dialog(
+    &model.render_pdf()?,
+    Some("Pedigree"),
+    &settings,
+)?;
+```
+
+Sit-with: with a 1-page full-chart PDF, Scale down → 1 page in Preview;
+Scale up → multi-page tiles.
 
 ### Windows
 - Backend is a stub — PDF/raster output works

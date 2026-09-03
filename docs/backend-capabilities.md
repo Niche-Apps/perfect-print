@@ -53,8 +53,33 @@ Interactive jobs (`print_pdf_bytes_with_dialog` / `NSPrintOperation`) set
 Printer, Presets, and the PDF menu are provided by `NSPrintPanel` itself.
 `PrintSettings` paper / orientation / scaling / duplex are **defaults** — they
 are not locked after the sheet opens. Pagination is `Automatic` (Clip is not
-forced; Clip discarded the Scale field). Color vs B&W is left to the printer's
-own system controls; this crate does not add a custom color accessory.
+forced; Clip discarded the Scale field). There is **no in-app sheet**; Scale
+lives on the native panel only.
+
+`PerfectPrintPDFView` computes the print page count from the live Scale:
+
+| Panel Scale | Result |
+|-------------|--------|
+| Fit, or any scale that fits the imageable content area | **1 page** |
+| Scale up | **N poster tiles** (row-major: left→right, then top→bottom) |
+| Scale down | **fewer tiles**, 1 when the content fits |
+
+Each print page is a contiguous crop of the source PDF page, not a copy of the
+whole page. Tiles do not overlap through content. The 28pt page margin is the
+tape/join strip; optional ≤8pt registration ticks and a margin-only “n of N”
+label (hidden when N = 1) live in that band. The label is the **post-scale**
+page count. Callers must not bake a stale “n of N” into a single full-chart
+page (Families may still draw chrome on a pre-tiled PDF — the view only adds
+chrome when *it* splits a source page).
+
+**Families / chart documents:** emit a **single-page PDF** whose MediaBox is
+the full chart (1 image pixel = 1 point, or the natural size in points). Do
+**not** pre-tile at 100% before opening `NSPrintPanel` — that freezes N so
+Scale cannot reduce the page count. Paper Size / Orientation / Scale stay on
+the system panel. There is no Families poster-scale slider.
+
+Color vs B&W is left to the printer's own system controls; this crate does not
+add a custom color accessory.
 
 ### Supported Print Settings
 | Setting | Flag | Notes |

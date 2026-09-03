@@ -120,6 +120,13 @@ pub enum PrintScaling {
 }
 ```
 
+On macOS interactive print, this is the **default** only. The native panel
+Scale field is live: content that fits the imageable area is 1 page; scaling
+up produces poster tiles; scaling down reduces the page count. `Custom(s)` is
+seeded onto the panel Scale field. See
+[integration-guide.md](integration-guide.md#single-full-chart-page-families-and-other-posters)
+for the single full-chart page contract.
+
 ## Validation
 
 `PrintSettings::validate()` checks settings against `PrinterCapabilities` and returns warnings for unsupported values:

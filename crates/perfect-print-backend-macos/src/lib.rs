@@ -3,6 +3,13 @@
 //! Interactive jobs open a standard `NSPrintPanel` via `NSPrintOperation`
 //! (`src/native_print.m`). PrintSettings paper size, orientation, duplex,
 //! and scaling are defaults only — the user can change them in the sheet.
+//! There is no in-app sheet; Scale lives on the native panel only.
+//!
+//! `PerfectPrintPDFView` paginates from the live panel Scale: a source page
+//! that fits the imageable content area is 1 print page; scaling up produces
+//! row-major poster tiles; scaling down reduces the tile count (1 when it
+//! fits). Callers that want this (notably Families charts) should send a
+//! **single-page PDF of the full chart**, not a pre-tiled 100% poster.
 //!
 //! Unattended jobs still use the CUPS CLI bridge:
 //! - `lpstat` for printer enumeration
@@ -62,6 +69,59 @@ pub const NATIVE_PRINT_PANEL_OPTIONS: u32 = {
 /// Clip discarded the panel Scale field.
 pub const NATIVE_PRINT_PAGINATION_CLIP: u32 = 2;
 
+/// Tape/join strip between poster tiles (pt). Matches Families' page margin.
+pub const POSTER_JOIN_MARGIN_PT: f64 = 28.0;
+
+/// Registration tick length in the join margin (pt). Must stay ≤ 8.
+pub const POSTER_TICK_LENGTH_PT: f64 = 6.0;
+
+/// FitToPage scaling mode passed to the native view.
+pub const SCALING_FIT_TO_PAGE: u8 = 0;
+/// FillPage scaling mode passed to the native view.
+pub const SCALING_FILL_PAGE: u8 = 1;
+/// None (1:1) scaling mode; panel `scalingFactor` still applies.
+pub const SCALING_NONE: u8 = 2;
+/// Custom scaling mode (seeded onto `printInfo.scalingFactor` as None).
+pub const SCALING_CUSTOM: u8 = 3;
+
+unsafe extern "C" {
+    fn perfect_print_native_inspect_poster_grid(
+        media_w: f64,
+        media_h: f64,
+        paper_w: f64,
+        paper_h: f64,
+        imageable_x: f64,
+        imageable_y: f64,
+        imageable_w: f64,
+        imageable_h: f64,
+        scaling_mode: u8,
+        custom_scale: f64,
+        panel_scale: f64,
+        out_cols: *mut u32,
+        out_rows: *mut u32,
+        out_pages: *mut u32,
+        out_scale: *mut f64,
+    ) -> i32;
+
+    fn perfect_print_native_inspect_poster_tile(
+        index: u32,
+        media_w: f64,
+        media_h: f64,
+        scale: f64,
+        tile_w: f64,
+        tile_h: f64,
+        out_col: *mut u32,
+        out_row: *mut u32,
+        out_index: *mut u32,
+        out_src_x: *mut f64,
+        out_src_y: *mut f64,
+        out_src_w: *mut f64,
+        out_src_h: *mut f64,
+        out_dest_w: *mut f64,
+        out_dest_h: *mut f64,
+    ) -> i32;
+}
+
 #[cfg(target_os = "macos")]
 unsafe extern "C" {
     fn perfect_print_pdf_dialog(
@@ -82,13 +142,125 @@ unsafe extern "C" {
     ) -> i32;
 }
 
+/// Inspect the poster grid for one source page (no AppKit, all platforms).
+///
+/// `scaling_mode` is 0=FitToPage, 1=FillPage, 2=None, 3=Custom.
+/// `panel_scale` is `NSPrintInfo.scalingFactor` (1.0 = 100%).
+pub fn inspect_poster_grid(
+    media_w: f64,
+    media_h: f64,
+    paper_w: f64,
+    paper_h: f64,
+    imageable: (f64, f64, f64, f64),
+    scaling_mode: u8,
+    custom_scale: f64,
+    panel_scale: f64,
+) -> (u32, u32, u32, f64) {
+    let mut cols = 0u32;
+    let mut rows = 0u32;
+    let mut pages = 0u32;
+    let mut scale = 0.0f64;
+    let rc = unsafe {
+        perfect_print_native_inspect_poster_grid(
+            media_w,
+            media_h,
+            paper_w,
+            paper_h,
+            imageable.0,
+            imageable.1,
+            imageable.2,
+            imageable.3,
+            scaling_mode,
+            custom_scale,
+            panel_scale,
+            &mut cols,
+            &mut rows,
+            &mut pages,
+            &mut scale,
+        )
+    };
+    assert_eq!(rc, 1, "poster grid inspect should always succeed");
+    (cols, rows, pages, scale)
+}
+
+/// One poster tile crop (0-based row-major index).
+#[derive(Debug, Clone, PartialEq)]
+pub struct PosterTile {
+    pub col: u32,
+    pub row: u32,
+    pub index: u32,
+    pub src_x: f64,
+    pub src_y: f64,
+    pub src_w: f64,
+    pub src_h: f64,
+    pub dest_w: f64,
+    pub dest_h: f64,
+}
+
+/// Inspect one poster tile crop (no AppKit, all platforms).
+pub fn inspect_poster_tile(
+    index: u32,
+    media_w: f64,
+    media_h: f64,
+    scale: f64,
+    tile_w: f64,
+    tile_h: f64,
+) -> Option<PosterTile> {
+    let mut col = 0u32;
+    let mut row = 0u32;
+    let mut out_index = 0u32;
+    let mut src_x = 0.0;
+    let mut src_y = 0.0;
+    let mut src_w = 0.0;
+    let mut src_h = 0.0;
+    let mut dest_w = 0.0;
+    let mut dest_h = 0.0;
+    let rc = unsafe {
+        perfect_print_native_inspect_poster_tile(
+            index,
+            media_w,
+            media_h,
+            scale,
+            tile_w,
+            tile_h,
+            &mut col,
+            &mut row,
+            &mut out_index,
+            &mut src_x,
+            &mut src_y,
+            &mut src_w,
+            &mut src_h,
+            &mut dest_w,
+            &mut dest_h,
+        )
+    };
+    if rc != 1 {
+        return None;
+    }
+    Some(PosterTile {
+        col,
+        row,
+        index: out_index,
+        src_x,
+        src_y,
+        src_w,
+        src_h,
+        dest_w,
+        dest_h,
+    })
+}
+
 /// Show the native macOS print panel for an in-memory PDF.
 ///
 /// The sheet is a standard `NSPrintPanel` (Printer, Presets, Copies, Pages,
 /// Paper Size, Orientation, Scale, Preview, Page Setup, PDF menu). Settings
 /// passed here are initial defaults; paper, orientation, scale, and
 /// two-sided remain user-overridable in the panel. Fit-to-page is the
-/// default scaling path.
+/// default scaling path. Scale on the panel changes the print page count
+/// (fit → 1 page; scale up → poster tiles).
+///
+/// For oversized charts (Families), send a **single full-chart page**. Do
+/// not pre-tile at 100% — that freezes N before the panel opens.
 ///
 /// Returns `Ok(true)` when the user submits the job and `Ok(false)` when the
 /// panel is cancelled. The native bridge always runs the panel on AppKit's main
@@ -622,6 +794,225 @@ mod tests {
             !code.contains("NSPrintingPaginationModeClip"),
             "interactive jobs must not force Clip pagination"
         );
+        for token in [
+            "PerfectPrintComputePosterGrid",
+            "PerfectPrintPosterContentBounds",
+            "currentPrintPageCount",
+            "PerfectPrintPosterTileAt",
+            "PERFECT_PRINT_TICK_LENGTH_PT",
+            "drawPosterChromeForTile",
+        ] {
+            assert!(
+                code.contains(token),
+                "native_print.m must keep {token} for live Scale → page count"
+            );
+        }
+        let tiles_h = include_str!("poster_tiles.h");
+        assert!(
+            tiles_h.contains("PERFECT_PRINT_JOIN_MARGIN_PT"),
+            "poster_tiles.h must define the 28pt join"
+        );
+        assert!(
+            !code.contains("range->length = self.pageNumbers.count"),
+            "knowsPageRange must not return the pre-tiled PDF page count"
+        );
+    }
+
+    fn letter_imageable() -> (f64, f64, f64, f64) {
+        (0.0, 0.0, 612.0, 792.0)
+    }
+
+    fn landscape_letter_imageable() -> (f64, f64, f64, f64) {
+        (0.0, 0.0, 792.0, 612.0)
+    }
+
+    #[test]
+    fn poster_join_and_tick_constants_match_families() {
+        assert_eq!(POSTER_JOIN_MARGIN_PT, 28.0);
+        assert_eq!(POSTER_TICK_LENGTH_PT, 6.0);
+        assert!(POSTER_TICK_LENGTH_PT <= 8.0);
+        let src = include_str!("poster_tiles.h");
+        assert!(src.contains("28.0"), "join margin");
+        assert!(src.contains("6.0"), "tick length");
+        assert!(src.contains("8.0"), "tick max");
+    }
+
+    #[test]
+    fn fit_to_page_at_100_percent_is_one_page_for_oversized_chart() {
+        // Typical Families 5-gen raster vs landscape Letter paper.
+        let (cols, rows, pages, _) = inspect_poster_grid(
+            2800.0,
+            2000.0,
+            792.0,
+            612.0,
+            landscape_letter_imageable(),
+            SCALING_FIT_TO_PAGE,
+            1.0,
+            1.0,
+        );
+        assert_eq!((cols, rows, pages), (1, 1, 1));
+    }
+
+    #[test]
+    fn scale_down_from_one_to_one_drops_page_count_to_one_when_it_fits() {
+        let avail_w = 792.0 - POSTER_JOIN_MARGIN_PT * 2.0;
+        let avail_h = 612.0 - POSTER_JOIN_MARGIN_PT * 2.0;
+        let media_w = avail_w * 2.0;
+        let media_h = avail_h * 2.0;
+
+        let (_, _, pages_100, _) = inspect_poster_grid(
+            media_w,
+            media_h,
+            792.0,
+            612.0,
+            landscape_letter_imageable(),
+            SCALING_NONE,
+            1.0,
+            1.0,
+        );
+        assert_eq!(pages_100, 4, "100% of a 2×2 chart is 4 poster pages");
+
+        let (_, _, pages_50, _) = inspect_poster_grid(
+            media_w,
+            media_h,
+            792.0,
+            612.0,
+            landscape_letter_imageable(),
+            SCALING_NONE,
+            1.0,
+            0.5,
+        );
+        assert_eq!(pages_50, 1, "Scale down until it fits must become 1 page");
+    }
+
+    #[test]
+    fn scale_up_from_fit_grows_page_count() {
+        let (cols_fit, rows_fit, pages_fit, _) = inspect_poster_grid(
+            1472.0,
+            1112.0,
+            792.0,
+            612.0,
+            landscape_letter_imageable(),
+            SCALING_FIT_TO_PAGE,
+            1.0,
+            1.0,
+        );
+        assert_eq!((cols_fit, rows_fit, pages_fit), (1, 1, 1));
+
+        let (cols, rows, pages, _) = inspect_poster_grid(
+            1472.0,
+            1112.0,
+            792.0,
+            612.0,
+            landscape_letter_imageable(),
+            SCALING_FIT_TO_PAGE,
+            1.0,
+            2.0,
+        );
+        assert!(pages > 1, "Scale up from Fit must create poster pages");
+        assert_eq!((cols, rows, pages), (2, 2, 4));
+    }
+
+    #[test]
+    fn poster_tiles_are_row_major_ltr_then_ttb_without_overlap() {
+        let scale = 1.0;
+        let tiles: Vec<PosterTile> = (0..4)
+            .map(|i| inspect_poster_tile(i, 80.0, 60.0, scale, 40.0, 30.0).expect("tile"))
+            .collect();
+        assert_eq!(
+            tiles
+                .iter()
+                .map(|t| (t.col, t.row, t.index))
+                .collect::<Vec<_>>(),
+            vec![(0, 0, 0), (1, 0, 1), (0, 1, 2), (1, 1, 3)]
+        );
+        assert!((tiles[0].src_x - 0.0).abs() < 1e-9 && (tiles[0].src_y - 0.0).abs() < 1e-9);
+        assert!((tiles[1].src_x - 40.0).abs() < 1e-9 && (tiles[1].src_y - 0.0).abs() < 1e-9);
+        assert!((tiles[2].src_x - 0.0).abs() < 1e-9 && (tiles[2].src_y - 30.0).abs() < 1e-9);
+        assert!((tiles[3].src_x - 40.0).abs() < 1e-9 && (tiles[3].src_y - 30.0).abs() < 1e-9);
+        for a in 0..tiles.len() {
+            for b in a + 1..tiles.len() {
+                let ta = &tiles[a];
+                let tb = &tiles[b];
+                let overlap_x = ta.src_x < tb.src_x + tb.src_w && tb.src_x < ta.src_x + ta.src_w;
+                let overlap_y = ta.src_y < tb.src_y + tb.src_h && tb.src_y < ta.src_y + ta.src_h;
+                assert!(
+                    !(overlap_x && overlap_y),
+                    "tiles {a} and {b} overlap in content"
+                );
+            }
+        }
+        assert!(inspect_poster_tile(4, 80.0, 60.0, scale, 40.0, 30.0).is_none());
+    }
+
+    #[test]
+    fn poster_last_column_is_remainder_not_stretched() {
+        let tile = inspect_poster_tile(1, 100.0, 50.0, 1.0, 60.0, 50.0).expect("right tile");
+        assert_eq!((tile.col, tile.row), (1, 0));
+        assert!((tile.src_x - 60.0).abs() < 1e-9);
+        assert!((tile.src_w - 40.0).abs() < 1e-9);
+        assert!((tile.dest_w - 40.0).abs() < 1e-9);
+        assert!((tile.dest_h - 50.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn content_bounds_use_28pt_join_inside_imageable() {
+        // Full-paper imageable (preview / Save PDF): content is paper − 56pt.
+        let (_, _, pages, _) = inspect_poster_grid(
+            736.0,
+            556.0,
+            792.0,
+            612.0,
+            landscape_letter_imageable(),
+            SCALING_NONE,
+            1.0,
+            1.0,
+        );
+        assert_eq!(pages, 1);
+
+        let (_, _, overflow, _) = inspect_poster_grid(
+            737.0,
+            556.0,
+            792.0,
+            612.0,
+            landscape_letter_imageable(),
+            SCALING_NONE,
+            1.0,
+            1.0,
+        );
+        assert_eq!(overflow, 2);
+    }
+
+    #[test]
+    fn chrome_contract_hides_label_when_one_page() {
+        let src = include_str!("native_print.m");
+        assert!(
+            src.contains("grid.pages <= 1 || totalPages <= 1"),
+            "chrome must hide when N=1"
+        );
+        assert!(
+            src.contains("%ld of %lu") || src.contains(" of "),
+            "chrome must draw post-scale n of N when N>1"
+        );
+        assert!(
+            src.contains("PERFECT_PRINT_TICK_LENGTH_PT"),
+            "registration ticks live in the join margin"
+        );
+    }
+
+    #[test]
+    fn letter_portrait_paper_still_fits_small_content() {
+        let (_, _, pages, _) = inspect_poster_grid(
+            400.0,
+            300.0,
+            612.0,
+            792.0,
+            letter_imageable(),
+            SCALING_NONE,
+            1.0,
+            1.0,
+        );
+        assert_eq!(pages, 1);
     }
 
     #[test]
