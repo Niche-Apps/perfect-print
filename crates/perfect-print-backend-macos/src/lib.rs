@@ -10,10 +10,13 @@
 //! - `lp` / `cancel` for submission and queue management
 
 use perfect_print_core::page::PageSize;
+#[cfg(target_os = "macos")]
+use perfect_print_dialog::ColorMode;
 use perfect_print_dialog::{
-    ColorMode, DuplexMode, PageOrientation, PageRange, PrintDialog, PrintDialogResult, PrintError,
+    DuplexMode, PageOrientation, PageRange, PrintDialog, PrintDialogResult, PrintError,
     PrintScaling, PrintSettings, Printer, PrinterCapabilities, PrinterState,
 };
+#[cfg(target_os = "macos")]
 use std::ffi::CString;
 use std::process::Command;
 
@@ -175,10 +178,15 @@ pub fn print_pdf_bytes_with_dialog(
 
 #[cfg(not(target_os = "macos"))]
 pub fn print_pdf_bytes_with_dialog(
-    _pdf_bytes: &[u8],
+    pdf_bytes: &[u8],
     _title: Option<&str>,
     _settings: &PrintSettings,
 ) -> PrintDialogResult<bool> {
+    if pdf_bytes.len() < 5 || !pdf_bytes.starts_with(b"%PDF-") {
+        return Err(PrintError::PrintFailed(
+            "Document is not a valid PDF payload".to_string(),
+        ));
+    }
     Err(PrintError::Platform(
         "The macOS print panel is unavailable on this platform".to_string(),
     ))
